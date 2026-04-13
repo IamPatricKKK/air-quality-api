@@ -1,0 +1,118 @@
+openapi: 3.1.0
+info:
+  title: air-quality-api
+  version: 0.1.0
+servers:
+  - url: http://localhost:3001/api/v1
+paths:
+  /health:
+    get:
+      summary: API health
+      responses:
+        "200":
+          description: OK
+  /auth/login:
+    post:
+      summary: Login for user or admin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                email:
+                  type: string
+                password:
+                  type: string
+      responses:
+        "200":
+          description: Session issued
+  /auth/register:
+    post:
+      summary: Register end user
+      responses:
+        "200":
+          description: User created
+  /auth/me:
+    get:
+      summary: Current authenticated user
+      responses:
+        "200":
+          description: Current user
+  /auth/logout:
+    post:
+      summary: Logout current session
+      responses:
+        "200":
+          description: Logged out
+  /stations:
+    get:
+      summary: List current stations with latest readings
+      responses:
+        "200":
+          description: Station list
+  /stations/{id}/history:
+    get:
+      summary: Read station history
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+        - in: query
+          name: hours
+          required: false
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Historical readings
+  /users/preferences:
+    get:
+      summary: Get user preferences
+      responses:
+        "200":
+          description: Preferences
+    patch:
+      summary: Update user preferences
+      responses:
+        "200":
+          description: Updated preferences
+  /notifications:
+    get:
+      summary: Get user notifications
+      responses:
+        "200":
+          description: User notifications
+  /admin/dashboard:
+    get:
+      summary: Admin dashboard summary
+      responses:
+        "200":
+          description: Dashboard payload
+  /admin/users:
+    get:
+      summary: Admin user list
+      responses:
+        "200":
+          description: User list
+  /admin/stations:
+    get:
+      summary: Admin station master list
+      responses:
+        "200":
+          description: Station list
+  /admin/notifications:
+    get:
+      summary: Admin notification history
+      responses:
+        "200":
+          description: Notification list
+  /.well-known/jwks.json:
+    get:
+      summary: JWKS for downstream verification
+      responses:
+        "200":
+          description: JWKS payload
