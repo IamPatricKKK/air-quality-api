@@ -1,10 +1,11 @@
 import { Entity, PrimaryKey, Property, ManyToOne, Unique } from '@mikro-orm/core';
 import { Station } from '../catalog/station.entity';
 import { SourceEndpoint } from './source-endpoint.entity';
+import { SourceProvider } from './source-provider.entity';
 import { User } from '../iam/user.entity';
 
 @Entity({ tableName: 'ingest.station_source_bindings' })
-@Unique({ properties: ['station', 'endpoint'] })
+@Unique({ properties: ['station', 'sourceEndpoint'] })
 export class StationSourceBinding {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
@@ -12,11 +13,14 @@ export class StationSourceBinding {
   @ManyToOne(() => Station, { onDelete: 'CASCADE' })
   station!: Station;
 
-  @ManyToOne(() => SourceEndpoint, { onDelete: 'CASCADE' })
-  endpoint!: SourceEndpoint;
+  @ManyToOne(() => SourceProvider, { fieldName: 'source_provider_id', onDelete: 'CASCADE' })
+  sourceProvider!: SourceProvider;
 
-  @Property({ type: 'text' })
-  externalObjectId!: string;
+  @ManyToOne(() => SourceEndpoint, { fieldName: 'source_endpoint_id', onDelete: 'CASCADE' })
+  sourceEndpoint!: SourceEndpoint;
+
+  @Property({ type: 'text', default: '' })
+  externalObjectId: string = '';
 
   @Property({ type: 'smallint', default: 100 })
   priority: number = 100;

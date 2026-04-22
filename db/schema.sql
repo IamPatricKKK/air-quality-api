@@ -350,11 +350,17 @@ CREATE TABLE ingest.source_endpoints (
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- Bindings giữa station và source endpoint. Cột tên với prefix "source_"
+-- để nhất quán với các bảng observation downstream (core.air_quality_observations,
+-- core.weather_observations đều dùng source_provider_id / source_endpoint_id).
+-- external_object_id có DEFAULT '' vì nhiều provider không có ID bên ngoài riêng
+-- (Open-Meteo dùng lat/lng; ingest service tự derive khi có).
 CREATE TABLE ingest.station_source_bindings (
   id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   station_id            UUID NOT NULL REFERENCES catalog.stations(id) ON DELETE CASCADE,
-  endpoint_id           UUID NOT NULL REFERENCES ingest.source_endpoints(id) ON DELETE CASCADE,
-  external_object_id    TEXT NOT NULL,
+  source_provider_id    UUID NOT NULL REFERENCES ingest.source_providers(id) ON DELETE CASCADE,
+  source_endpoint_id    UUID NOT NULL REFERENCES ingest.source_endpoints(id) ON DELETE CASCADE,
+  external_object_id    TEXT NOT NULL DEFAULT '',
   priority              SMALLINT NOT NULL DEFAULT 100,
   is_enabled            BOOLEAN NOT NULL DEFAULT true,
   config                JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -363,7 +369,7 @@ CREATE TABLE ingest.station_source_bindings (
   updated_by_user_id    UUID REFERENCES iam.users(id) ON DELETE SET NULL,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (station_id, endpoint_id)
+  UNIQUE (station_id, source_endpoint_id)
 );
 
 CREATE TABLE ingest.pipeline_definitions (
@@ -503,6 +509,12 @@ CREATE TABLE core.air_quality_observations (
   temperature_c         DOUBLE PRECISION,
   humidity_pct          DOUBLE PRECISION CHECK (humidity_pct IS NULL OR humidity_pct BETWEEN 0 AND 100),
   wind_speed_mps        DOUBLE PRECISION CHECK (wind_speed_mps IS NULL OR wind_speed_mps >= 0),
+  -- Các cột nâng cao do ingest service điền (xem migration 002_expand_ingest.sql)
+  european_aqi          INTEGER,
+  uv_index              DOUBLE PRECISION,
+  ammonia               DOUBLE PRECISION,
+  dust                  DOUBLE PRECISION,
+  aerosol_optical_depth DOUBLE PRECISION,
   quality_status        public.quality_status_enum NOT NULL DEFAULT 'valid',
   lineage               JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -529,6 +541,12 @@ CREATE TABLE core.weather_observations (
   precipitation_mm      DOUBLE PRECISION CHECK (precipitation_mm IS NULL OR precipitation_mm >= 0),
   cloud_cover_pct       DOUBLE PRECISION CHECK (cloud_cover_pct IS NULL OR cloud_cover_pct BETWEEN 0 AND 100),
   weather_code          TEXT,
+  -- Các cột nâng cao do ingest service điền (xem migration 002_expand_ingest.sql)
+  apparent_temperature_c DOUBLE PRECISION,
+  dew_point_c            DOUBLE PRECISION,
+  wind_gusts_mps         DOUBLE PRECISION,
+  surface_pressure_hpa   DOUBLE PRECISION,
+  rain_mm                DOUBLE PRECISION,
   quality_status        public.quality_status_enum NOT NULL DEFAULT 'valid',
   lineage               JSONB NOT NULL DEFAULT '{}'::jsonb,
   created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -1133,7 +1151,7 @@ SELECT
   latest_obs.quality_status   AS latest_quality
 FROM catalog.stations s
 LEFT JOIN ingest.station_source_bindings sb ON sb.station_id = s.id
-LEFT JOIN ingest.source_endpoints se        ON se.id = sb.endpoint_id
+LEFT JOIN ingest.source_endpoints se        ON se.id = sb.source_endpoint_id
 LEFT JOIN ingest.source_providers sp        ON sp.id = se.provider_id
 LEFT JOIN LATERAL (
   SELECT observed_at, aqi, quality_status
@@ -1181,8 +1199,7 @@ LEFT JOIN LATERAL (
 LEFT JOIN LATERAL (
   SELECT COUNT(*) FILTER (WHERE sb.is_enabled) AS active_count
   FROM ingest.station_source_bindings sb
-  JOIN ingest.source_endpoints se ON se.id = sb.endpoint_id
-  WHERE se.provider_id = sp.id
+  WHERE sb.source_provider_id = sp.id
 ) bindings ON true
 LEFT JOIN LATERAL (
   SELECT MAX(request_started_at) AS last_success_at

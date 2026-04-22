@@ -201,16 +201,54 @@ export class IngestService {
     }
   }
 
+  /**
+   * Đảm bảo có 1 pipeline definition "default" cho mỗi provider (cần vì
+   * schema yêu cầu pipeline_runs.pipeline_definition_id NOT NULL).
+   * Cache in-memory theo providerId để không query lặp.
+   */
+  private pipelineDefCache = new Map<string, string>();
+
+  private async ensureDefaultPipelineDefinition(
+    providerId: string,
+    providerCode: string,
+  ): Promise<string> {
+    const cached = this.pipelineDefCache.get(providerId);
+    if (cached) return cached;
+
+    const code = `${providerCode}-default`;
+    const name = `${providerCode} default pipeline`;
+
+    await this.em.getConnection().execute(
+      `INSERT INTO ingest.pipeline_definitions
+         (code, name, pipeline_type, owner_service, is_active, config)
+       VALUES ($1, $2, 'ingest', 'api', TRUE, '{}'::jsonb)
+       ON CONFLICT (code) DO NOTHING`,
+      [code, name],
+    );
+
+    const result: any = await this.em.getConnection().execute(
+      `SELECT id::text FROM ingest.pipeline_definitions WHERE code=$1`,
+      [code],
+    );
+    const defId: string | undefined = Array.isArray(result) ? result[0]?.id : result?.rows?.[0]?.id;
+    if (!defId) throw new Error(`Failed to ensure pipeline definition ${code}`);
+    this.pipelineDefCache.set(providerId, defId);
+    return defId;
+  }
+
   private async createPipelineRun(
     providerId: string,
     endpointId: string,
     triggerType: string,
+    providerCode = "unknown",
   ): Promise<string> {
+    const definitionId = await this.ensureDefaultPipelineDefinition(providerId, providerCode);
     const result = await this.em.getConnection().execute(
-      `INSERT INTO ingest.pipeline_runs (source_provider_id, source_endpoint_id, trigger_type, status, started_at, stats)
-       VALUES ($1,$2,$3,'running',now(),'{}'::jsonb)
+      `INSERT INTO ingest.pipeline_runs
+         (pipeline_definition_id, source_endpoint_id, trigger_type, status, started_at, metrics)
+       VALUES ($1, $2, $3, 'running', now(), '{}'::jsonb)
        RETURNING id`,
-      [providerId, endpointId, triggerType],
+      [definitionId, endpointId, triggerType],
     );
     return result.rows[0].id;
   }
@@ -223,8 +261,11 @@ export class IngestService {
   ) {
     await this.em.getConnection().execute(
       `UPDATE ingest.pipeline_runs
-       SET status=$2, finished_at=now(), stats=$3::jsonb, error_message=$4
-       WHERE id=$1`,
+         SET status = $2,
+             finished_at = now(),
+             metrics = $3::jsonb,
+             error_summary = $4
+       WHERE id = $1`,
       [runId, status, JSON.stringify(stats), errorMessage ?? null],
     );
   }
@@ -238,13 +279,15 @@ export class IngestService {
     latencyMs: number,
     ok: boolean,
   ): Promise<string> {
+    const statusEnum = ok ? "success" : "failed";
     const result = await this.em.getConnection().execute(
       `INSERT INTO ingest.outbound_requests
-        (pipeline_run_id, source_provider_id, source_endpoint_id, request_url, http_method,
-         request_headers, request_body, response_status, response_headers, latency_ms, succeeded, requested_at)
-      VALUES ($1,$2,$3,$4,'GET','{}'::jsonb, NULL, $5, '{}'::jsonb, $6, $7, now())
-      RETURNING id`,
-      [pipelineRunId, providerId, endpointId, url, statusCode, latencyMs, ok],
+         (pipeline_run_id, source_provider_id, source_endpoint_id,
+          request_url, request_method, request_params,
+          http_status, status, latency_ms, request_started_at, response_received_at)
+       VALUES ($1, $2, $3, $4, 'GET', '{}'::jsonb, $5, $6::public.request_status_enum, $7, now(), now())
+       RETURNING id`,
+      [pipelineRunId, providerId, endpointId, url, statusCode, statusEnum, latencyMs],
     );
     return result.rows[0].id;
   }
@@ -252,6 +295,7 @@ export class IngestService {
   private async storeRawPayload(
     pipelineRunId: string,
     outboundId: string,
+    providerId: string,
     endpointId: string,
     stationId: string,
     payload: unknown,
@@ -259,14 +303,14 @@ export class IngestService {
     const body = JSON.stringify(payload);
     const hash = sha256Hex(`${endpointId}:${stationId}:${body}`);
 
-    // Try to upsert using raw SQL for on-conflict semantics
     const result = await this.em.getConnection().execute(
       `INSERT INTO ingest.raw_payloads
-        (pipeline_run_id, outbound_request_id, source_endpoint_id, station_id, payload, payload_hash, received_at)
-      VALUES ($1,$2,$3,$4,$5::jsonb,$6, now())
-      ON CONFLICT (payload_hash) DO UPDATE SET received_at = EXCLUDED.received_at
-      RETURNING id`,
-      [pipelineRunId, outboundId, endpointId, stationId, body, hash],
+         (pipeline_run_id, outbound_request_id, source_provider_id, source_endpoint_id, station_id,
+          payload_format, payload_json, payload_hash, fetched_at)
+       VALUES ($1, $2, $3, $4, $5, 'json', $6::jsonb, $7, now())
+       ON CONFLICT (source_provider_id, payload_hash) DO UPDATE SET fetched_at = EXCLUDED.fetched_at
+       RETURNING id`,
+      [pipelineRunId, outboundId, providerId, endpointId, stationId, body, hash],
     );
     return result.rows[0].id;
   }
@@ -276,8 +320,9 @@ export class IngestService {
     rawPayloadId: string,
   ): Promise<string> {
     const result = await this.em.getConnection().execute(
-      `INSERT INTO ingest.normalize_runs (pipeline_run_id, raw_payload_id, status, started_at)
-       VALUES ($1,$2,'running',now())
+      `INSERT INTO ingest.normalize_runs
+         (pipeline_run_id, raw_payload_id, status, records_in, records_out)
+       VALUES ($1, $2, 'running', 0, 0)
        RETURNING id`,
       [pipelineRunId, rawPayloadId],
     );
@@ -286,7 +331,9 @@ export class IngestService {
 
   private async finalizeNormalizeRun(id: string, inserted: number) {
     await this.em.getConnection().execute(
-      `UPDATE ingest.normalize_runs SET status='succeeded', finished_at=now(), records_written=$2 WHERE id=$1`,
+      `UPDATE ingest.normalize_runs
+         SET status = 'succeeded', records_out = $2
+       WHERE id = $1`,
       [id, inserted],
     );
   }
@@ -471,7 +518,7 @@ export class IngestService {
           );
         }
 
-        const runId = await this.createPipelineRun(providerId, endpointId, triggerType);
+        const runId = await this.createPipelineRun(providerId, endpointId, triggerType, WAQI_PROVIDER_CODE);
         return { providerId, endpointId, runId };
       });
       if (!setup) throw new Error("Database not configured");
@@ -491,7 +538,7 @@ export class IngestService {
               runId, providerId, endpointId, safeUrl, res.status, res.latency_ms, res.ok,
             );
             if (!res.ok) throw new Error(`WAQI HTTP ${res.status}: ${res.payload?.data ?? "unknown"}`);
-            const rawId = await this.storeRawPayload(runId, outId, endpointId, s.id, res.payload);
+            const rawId = await this.storeRawPayload(runId, outId, providerId, endpointId, s.id, res.payload);
             const normId = await this.createNormalizeRun(runId, rawId);
             const points = normalizeWaqiAq(res.payload);
             const inserted = await this.insertAqObservations(
@@ -620,7 +667,7 @@ export class IngestService {
           );
         }
 
-        const runId = await this.createPipelineRun(providerId, endpointId, triggerType);
+        const runId = await this.createPipelineRun(providerId, endpointId, triggerType, IQAIR_PROVIDER_CODE);
         return { providerId, endpointId, runId };
       });
       if (!setup) throw new Error("Database not configured");
@@ -643,7 +690,7 @@ export class IngestService {
               const msg = res.payload?.data?.message ?? res.payload?.message ?? `HTTP ${res.status}`;
               throw new Error(`IQAir: ${msg}`);
             }
-            const rawId = await this.storeRawPayload(runId, outId, endpointId, s.id, res.payload);
+            const rawId = await this.storeRawPayload(runId, outId, providerId, endpointId, s.id, res.payload);
             const normId = await this.createNormalizeRun(runId, rawId);
             const aqPoints = normalizeIqairAq(res.payload);
             const weatherPoints = normalizeIqairWeather(res.payload);
@@ -798,7 +845,7 @@ export class IngestService {
           }
         }
 
-        const runId = await this.createPipelineRun(providerId, airEndpointId, triggerType);
+        const runId = await this.createPipelineRun(providerId, airEndpointId, triggerType, OPENWEATHER_PROVIDER_CODE);
         return { providerId, airEndpointId, weatherEndpointId, runId };
       });
       if (!setup) throw new Error("Database not configured");
@@ -816,7 +863,7 @@ export class IngestService {
               runId, providerId, airEndpointId, safeUrl, res.status, res.latency_ms, res.ok,
             );
             if (!res.ok) throw new Error(`OpenWeather AQ HTTP ${res.status}: ${res.payload?.message ?? "unknown"}`);
-            const rawId = await this.storeRawPayload(runId, outId, airEndpointId, s.id, res.payload);
+            const rawId = await this.storeRawPayload(runId, outId, providerId, airEndpointId, s.id, res.payload);
             const normId = await this.createNormalizeRun(runId, rawId);
             const points = normalizeOpenweatherAq(res.payload);
             const inserted = await this.insertAqObservations(
@@ -841,7 +888,7 @@ export class IngestService {
               runId, providerId, weatherEndpointId, safeUrl, res.status, res.latency_ms, res.ok,
             );
             if (!res.ok) throw new Error(`OpenWeather Weather HTTP ${res.status}: ${res.payload?.message ?? "unknown"}`);
-            const rawId = await this.storeRawPayload(runId, outId, weatherEndpointId, s.id, res.payload);
+            const rawId = await this.storeRawPayload(runId, outId, providerId, weatherEndpointId, s.id, res.payload);
             const normId = await this.createNormalizeRun(runId, rawId);
             const points = normalizeOpenweatherWeather(res.payload);
             const inserted = await this.insertWeatherObservations(
@@ -999,7 +1046,7 @@ export class IngestService {
           timezone: s.timezone,
         }));
         await this.ensureBindings(stations, providerId, aqEndpointId, weatherEndpointId);
-        const runId = await this.createPipelineRun(providerId, aqEndpointId, triggerType);
+        const runId = await this.createPipelineRun(providerId, aqEndpointId, triggerType, OPENMETEO_PROVIDER_CODE);
         return { providerId, aqEndpointId, weatherEndpointId, runId };
       });
       if (!setup) throw new Error("Database not configured");
@@ -1024,7 +1071,7 @@ export class IngestService {
               runId, providerId, aqEndpointId, aqUrl, resAq.status, resAq.latency_ms, resAq.ok,
             );
             if (!resAq.ok) throw new Error(`AQ HTTP ${resAq.status}`);
-            const rawId = await this.storeRawPayload(runId, outId, aqEndpointId, s.id, resAq.payload);
+            const rawId = await this.storeRawPayload(runId, outId, providerId, aqEndpointId, s.id, resAq.payload);
             const normId = await this.createNormalizeRun(runId, rawId);
             const points = normalizeAq(resAq.payload);
             const inserted = await this.insertAqObservations(
@@ -1054,7 +1101,7 @@ export class IngestService {
               runId, providerId, weatherEndpointId, wUrl, resW.status, resW.latency_ms, resW.ok,
             );
             if (!resW.ok) throw new Error(`Weather HTTP ${resW.status}`);
-            const rawId = await this.storeRawPayload(runId, outId, weatherEndpointId, s.id, resW.payload);
+            const rawId = await this.storeRawPayload(runId, outId, providerId, weatherEndpointId, s.id, resW.payload);
             const normId = await this.createNormalizeRun(runId, rawId);
             const points = normalizeWeather(resW.payload);
             const inserted = await this.insertWeatherObservations(

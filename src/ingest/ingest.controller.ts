@@ -260,10 +260,6 @@ export class IngestController {
   }
 
   // ---------- Source bindings (CRUD) ----------
-  //
-  // Schema thực tế: ingest.station_source_bindings dùng cột endpoint_id +
-  // external_object_id (không có source_provider_id trực tiếp — join qua
-  // ingest.source_endpoints.provider_id để lấy providerCode).
 
   @Get("source-bindings")
   async sourceBindings(@Headers("authorization") authHeader?: string) {
@@ -283,8 +279,8 @@ export class IngestController {
          ssb.updated_at                AS "updatedAt"
        FROM ingest.station_source_bindings ssb
        JOIN catalog.stations s        ON s.id = ssb.station_id
-       JOIN ingest.source_endpoints se ON se.id = ssb.endpoint_id
-       JOIN ingest.source_providers sp ON sp.id = se.provider_id
+       JOIN ingest.source_endpoints se ON se.id = ssb.source_endpoint_id
+       JOIN ingest.source_providers sp ON sp.id = ssb.source_provider_id
        ORDER BY s.name, ssb.priority, se.code`,
     );
     return rows ?? [];
@@ -316,11 +312,8 @@ export class IngestController {
          ssb.id::text                                                        AS "id",
          (SELECT s.id::text FROM catalog.stations s WHERE s.id = ssb.station_id) AS "stationId",
          (SELECT s.name      FROM catalog.stations s WHERE s.id = ssb.station_id) AS "stationName",
-         (SELECT sp.code
-          FROM ingest.source_endpoints se
-          JOIN ingest.source_providers sp ON sp.id = se.provider_id
-          WHERE se.id = ssb.endpoint_id)                                     AS "providerCode",
-         (SELECT se.code FROM ingest.source_endpoints se WHERE se.id = ssb.endpoint_id) AS "endpointCode",
+         (SELECT sp.code FROM ingest.source_providers sp WHERE sp.id = ssb.source_provider_id) AS "providerCode",
+         (SELECT se.code FROM ingest.source_endpoints se WHERE se.id = ssb.source_endpoint_id) AS "endpointCode",
          ssb.external_object_id                                              AS "externalObjectId",
          ssb.priority,
          ssb.is_enabled                                                      AS "isEnabled",
