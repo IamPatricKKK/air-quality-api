@@ -35,6 +35,34 @@ export class IngestController {
     }
   }
 
+  @Post("run/iqair")
+  async triggerIqair(@Headers("authorization") authHeader?: string) {
+    requireAuth(authHeader, ADMIN_ROLES);
+    if (this.ingest.isRunning()) {
+      throw new HttpException("Ingest already running", 409);
+    }
+    try {
+      const result = await this.ingest.runIqair("manual");
+      return { ok: true, ...result };
+    } catch (e: any) {
+      throw new HttpException(e?.message ?? "Ingest failed", 500);
+    }
+  }
+
+  @Post("run/openweather")
+  async triggerOpenweather(@Headers("authorization") authHeader?: string) {
+    requireAuth(authHeader, ADMIN_ROLES);
+    if (this.ingest.isRunning()) {
+      throw new HttpException("Ingest already running", 409);
+    }
+    try {
+      const result = await this.ingest.runOpenweather("manual");
+      return { ok: true, ...result };
+    } catch (e: any) {
+      throw new HttpException(e?.message ?? "Ingest failed", 500);
+    }
+  }
+
   @Get("source-compare")
   async sourceCompare(
     @Headers("authorization") authHeader?: string,

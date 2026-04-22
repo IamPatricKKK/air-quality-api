@@ -36,6 +36,36 @@ import {
   normalizeWaqiAq,
 } from "./waqi";
 import {
+  IQAIR_PROVIDER_CODE,
+  IQAIR_PROVIDER_NAME,
+  IQAIR_PROVIDER_CATEGORY,
+  IQAIR_PROVIDER_BASE_URL,
+  IQAIR_NEAREST_CITY_ENDPOINT_CODE,
+  IQAIR_NEAREST_CITY_PARSER_KEY,
+  IQAIR_NEAREST_CITY_PATH,
+  buildIqairNearestCityUrl,
+  fetchIqair,
+  normalizeIqairAq,
+  normalizeIqairWeather,
+} from "./iqair";
+import {
+  OPENWEATHER_PROVIDER_CODE,
+  OPENWEATHER_PROVIDER_NAME,
+  OPENWEATHER_PROVIDER_CATEGORY,
+  OPENWEATHER_PROVIDER_BASE_URL,
+  OPENWEATHER_AIR_POLLUTION_ENDPOINT_CODE,
+  OPENWEATHER_AIR_POLLUTION_PARSER_KEY,
+  OPENWEATHER_AIR_POLLUTION_PATH,
+  OPENWEATHER_WEATHER_ENDPOINT_CODE,
+  OPENWEATHER_WEATHER_PARSER_KEY,
+  OPENWEATHER_WEATHER_PATH,
+  buildOpenweatherAirPollutionUrl,
+  buildOpenweatherWeatherUrl,
+  fetchOpenweather,
+  normalizeOpenweatherAq,
+  normalizeOpenweatherWeather,
+} from "./openweather";
+import {
   SourceProvider,
   SourceEndpoint,
   StationSourceBinding,
@@ -67,6 +97,8 @@ export interface SyncResult {
 export interface MultiSyncResult {
   openmeteo: SyncResult | null;
   waqi: SyncResult | null;
+  iqair: SyncResult | null;
+  openweather: SyncResult | null;
   total_aq_points: number;
   total_weather_points: number;
   total_errors: string[];
@@ -504,13 +536,385 @@ export class IngestService {
     }
   }
 
+  // ---------- IQAir provider setup ----------
+
+  async ensureIqairProviderAndEndpoint() {
+    await this.em.getConnection().execute(
+      `INSERT INTO ingest.source_providers (code, name, category, base_url, is_active, config)
+       VALUES ($1,$2,$3,$4,TRUE,$5::jsonb)
+       ON CONFLICT (code) DO NOTHING`,
+      [
+        IQAIR_PROVIDER_CODE,
+        IQAIR_PROVIDER_NAME,
+        IQAIR_PROVIDER_CATEGORY,
+        IQAIR_PROVIDER_BASE_URL,
+        JSON.stringify({ requires_token: true, rate_limit_rpm: 5, free_tier_monthly: 10000, priority: "primary" }),
+      ],
+    );
+
+    const provider = await this.em.findOne(SourceProvider, { code: IQAIR_PROVIDER_CODE });
+    if (!provider) throw new Error("Failed to ensure IQAir provider");
+    const providerId = provider.id;
+
+    await this.em.getConnection().execute(
+      `INSERT INTO ingest.source_endpoints
+         (source_provider_id, code, name, base_url, path, http_method, parser_key, is_active, config)
+       VALUES ($1,$2,$3,$4,$5,'GET',$6,TRUE,'{}'::jsonb)
+       ON CONFLICT (code) DO UPDATE
+       SET name = EXCLUDED.name, base_url = EXCLUDED.base_url, parser_key = EXCLUDED.parser_key, is_active = TRUE`,
+      [
+        providerId,
+        IQAIR_NEAREST_CITY_ENDPOINT_CODE,
+        "IQAir Nearest City (realtime AQI + weather)",
+        IQAIR_PROVIDER_BASE_URL,
+        IQAIR_NEAREST_CITY_PATH,
+        IQAIR_NEAREST_CITY_PARSER_KEY,
+      ],
+    );
+
+    const endpoint = await this.em.findOne(SourceEndpoint, { code: IQAIR_NEAREST_CITY_ENDPOINT_CODE });
+    if (!endpoint) throw new Error("Failed to ensure IQAir endpoint");
+    return { providerId, endpointId: endpoint.id };
+  }
+
+  // ---------- IQAir ingest ----------
+
+  async runIqair(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
+    const apiKey = process.env.IQAIR_API_KEY;
+    if (!apiKey) {
+      this.logger.warn("IQAIR_API_KEY not set — skipping IQAir ingest");
+      return { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: ["IQAIR_API_KEY not configured"] };
+    }
+
+    const started = Date.now();
+    const errors: string[] = [];
+    let stations: StationRow[] = [];
+    let aqCount = 0;
+    let weatherCount = 0;
+    let pipelineRunId = "";
+
+    try {
+      const setup = await this.em.transactional(async (em) => {
+        const { providerId, endpointId } = await this.ensureIqairProviderAndEndpoint();
+        const stationsResult = await em.find(
+          Station,
+          { isActive: true },
+          { orderBy: { code: "ASC" } },
+        );
+        stations = stationsResult.map((s) => ({
+          id: s.id,
+          code: s.code,
+          lat: s.lat,
+          lng: s.lng,
+          timezone: s.timezone,
+        }));
+
+        // IQAir = primary provider → priority 50 (thấp số = cao ưu tiên)
+        for (const s of stations) {
+          await em.getConnection().execute(
+            `INSERT INTO ingest.station_source_bindings
+               (station_id, source_provider_id, source_endpoint_id, is_enabled, priority, valid_from, config)
+             VALUES ($1,$2,$3,TRUE,50,now(),'{}'::jsonb)
+             ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
+            [s.id, providerId, endpointId],
+          );
+        }
+
+        const runId = await this.createPipelineRun(providerId, endpointId, triggerType);
+        return { providerId, endpointId, runId };
+      });
+      if (!setup) throw new Error("Database not configured");
+      pipelineRunId = setup.runId;
+      const { providerId, endpointId, runId } = setup;
+
+      // IQAir rate-limit: ~5 req/minute on community free tier, nên delay 300ms giữa mỗi station
+      for (let i = 0; i < stations.length; i++) {
+        const s = stations[i];
+        try {
+          const url = buildIqairNearestCityUrl(s.lat, s.lng, apiKey);
+          const safeUrl = url.replace(/key=[^&]+/, "key=***");
+          const res = await fetchIqair(url);
+
+          const counts = await this.em.transactional(async (em) => {
+            const outId = await this.recordOutbound(
+              runId, providerId, endpointId, safeUrl, res.status, res.latency_ms, res.ok,
+            );
+            if (!res.ok) {
+              const msg = res.payload?.data?.message ?? res.payload?.message ?? `HTTP ${res.status}`;
+              throw new Error(`IQAir: ${msg}`);
+            }
+            const rawId = await this.storeRawPayload(runId, outId, endpointId, s.id, res.payload);
+            const normId = await this.createNormalizeRun(runId, rawId);
+            const aqPoints = normalizeIqairAq(res.payload);
+            const weatherPoints = normalizeIqairWeather(res.payload);
+            const aqInserted = await this.insertAqObservations(
+              s, providerId, endpointId, runId, rawId, normId, aqPoints,
+            );
+            const weatherInserted = await this.insertWeatherObservations(
+              s, providerId, endpointId, runId, rawId, normId, weatherPoints,
+            );
+            await this.finalizeNormalizeRun(normId, aqInserted + weatherInserted);
+            return { aq: aqInserted, weather: weatherInserted };
+          });
+          aqCount += counts?.aq ?? 0;
+          weatherCount += counts?.weather ?? 0;
+
+          // Rate-limit delay (IQAir community: ~5 req/min)
+          if (i < stations.length - 1) {
+            await new Promise((resolve) => setTimeout(resolve, 300));
+          }
+        } catch (e: any) {
+          errors.push(`[${s.code}][iqair] ${e?.message ?? e}`);
+          this.logger.warn(`IQAir failed for ${s.code}: ${e?.message}`);
+        }
+      }
+
+      const status: "succeeded" | "partial" | "failed" =
+        errors.length === 0 ? "succeeded" : aqCount + weatherCount > 0 ? "partial" : "failed";
+      await this.em.transactional(async () => {
+        await this.finalizePipelineRun(pipelineRunId, status, {
+          stations: stations.length,
+          aq_points: aqCount,
+          weather_points: weatherCount,
+          errors_count: errors.length,
+          duration_ms: Date.now() - started,
+        }, errors.length ? errors.slice(0, 5).join("; ") : undefined);
+      });
+
+      return { pipeline_run_id: pipelineRunId, stations: stations.length, aq_points: aqCount, weather_points: weatherCount, errors };
+    } catch (e: any) {
+      this.logger.error(`IQAir ingest failed: ${e?.message}`);
+      if (pipelineRunId) {
+        await this.em.transactional(async () => {
+          await this.finalizePipelineRun(pipelineRunId, "failed", {}, String(e?.message ?? e));
+        });
+      }
+      throw e;
+    }
+  }
+
+  // ---------- OpenWeather provider setup ----------
+
+  async ensureOpenweatherProviderAndEndpoints() {
+    await this.em.getConnection().execute(
+      `INSERT INTO ingest.source_providers (code, name, category, base_url, is_active, config)
+       VALUES ($1,$2,$3,$4,TRUE,$5::jsonb)
+       ON CONFLICT (code) DO NOTHING`,
+      [
+        OPENWEATHER_PROVIDER_CODE,
+        OPENWEATHER_PROVIDER_NAME,
+        OPENWEATHER_PROVIDER_CATEGORY,
+        OPENWEATHER_PROVIDER_BASE_URL,
+        JSON.stringify({ requires_token: true, free_tier_daily: 1000, priority: "secondary" }),
+      ],
+    );
+
+    const provider = await this.em.findOne(SourceProvider, { code: OPENWEATHER_PROVIDER_CODE });
+    if (!provider) throw new Error("Failed to ensure OpenWeather provider");
+    const providerId = provider.id;
+
+    const upsertEndpoint = async (code: string, name: string, path: string, parserKey: string) => {
+      await this.em.getConnection().execute(
+        `INSERT INTO ingest.source_endpoints
+           (source_provider_id, code, name, base_url, path, http_method, parser_key, is_active, config)
+         VALUES ($1,$2,$3,$4,$5,'GET',$6,TRUE,'{}'::jsonb)
+         ON CONFLICT (code) DO UPDATE
+         SET name = EXCLUDED.name, base_url = EXCLUDED.base_url, path = EXCLUDED.path,
+             parser_key = EXCLUDED.parser_key, is_active = TRUE`,
+        [providerId, code, name, OPENWEATHER_PROVIDER_BASE_URL, path, parserKey],
+      );
+    };
+
+    await upsertEndpoint(
+      OPENWEATHER_AIR_POLLUTION_ENDPOINT_CODE,
+      "OpenWeather Air Pollution (current)",
+      OPENWEATHER_AIR_POLLUTION_PATH,
+      OPENWEATHER_AIR_POLLUTION_PARSER_KEY,
+    );
+    await upsertEndpoint(
+      OPENWEATHER_WEATHER_ENDPOINT_CODE,
+      "OpenWeather Current Weather",
+      OPENWEATHER_WEATHER_PATH,
+      OPENWEATHER_WEATHER_PARSER_KEY,
+    );
+
+    const endpoints = await this.em.find(SourceEndpoint, {
+      code: {
+        $in: [OPENWEATHER_AIR_POLLUTION_ENDPOINT_CODE, OPENWEATHER_WEATHER_ENDPOINT_CODE],
+      },
+    });
+    const map: Record<string, string> = {};
+    for (const e of endpoints) map[e.code] = e.id;
+    return {
+      providerId,
+      airEndpointId: map[OPENWEATHER_AIR_POLLUTION_ENDPOINT_CODE],
+      weatherEndpointId: map[OPENWEATHER_WEATHER_ENDPOINT_CODE],
+    };
+  }
+
+  // ---------- OpenWeather ingest ----------
+
+  async runOpenweather(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
+    const apiKey = process.env.OPENWEATHER_API_KEY;
+    if (!apiKey) {
+      this.logger.warn("OPENWEATHER_API_KEY not set — skipping OpenWeather ingest");
+      return { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: ["OPENWEATHER_API_KEY not configured"] };
+    }
+
+    const started = Date.now();
+    const errors: string[] = [];
+    let stations: StationRow[] = [];
+    let aqCount = 0;
+    let weatherCount = 0;
+    let pipelineRunId = "";
+
+    try {
+      const setup = await this.em.transactional(async (em) => {
+        const { providerId, airEndpointId, weatherEndpointId } =
+          await this.ensureOpenweatherProviderAndEndpoints();
+        const stationsResult = await em.find(
+          Station,
+          { isActive: true },
+          { orderBy: { code: "ASC" } },
+        );
+        stations = stationsResult.map((s) => ({
+          id: s.id,
+          code: s.code,
+          lat: s.lat,
+          lng: s.lng,
+          timezone: s.timezone,
+        }));
+
+        // OpenWeather = secondary → priority 150 (sau IQAir=50, OpenMeteo=100)
+        for (const s of stations) {
+          for (const endpointId of [airEndpointId, weatherEndpointId]) {
+            await em.getConnection().execute(
+              `INSERT INTO ingest.station_source_bindings
+                 (station_id, source_provider_id, source_endpoint_id, is_enabled, priority, valid_from, config)
+               VALUES ($1,$2,$3,TRUE,150,now(),'{}'::jsonb)
+               ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
+              [s.id, providerId, endpointId],
+            );
+          }
+        }
+
+        const runId = await this.createPipelineRun(providerId, airEndpointId, triggerType);
+        return { providerId, airEndpointId, weatherEndpointId, runId };
+      });
+      if (!setup) throw new Error("Database not configured");
+      pipelineRunId = setup.runId;
+      const { providerId, airEndpointId, weatherEndpointId, runId } = setup;
+
+      for (const s of stations) {
+        // Air pollution
+        try {
+          const url = buildOpenweatherAirPollutionUrl(s.lat, s.lng, apiKey);
+          const safeUrl = url.replace(/appid=[^&]+/, "appid=***");
+          const res = await fetchOpenweather(url);
+          const count = await this.em.transactional(async () => {
+            const outId = await this.recordOutbound(
+              runId, providerId, airEndpointId, safeUrl, res.status, res.latency_ms, res.ok,
+            );
+            if (!res.ok) throw new Error(`OpenWeather AQ HTTP ${res.status}: ${res.payload?.message ?? "unknown"}`);
+            const rawId = await this.storeRawPayload(runId, outId, airEndpointId, s.id, res.payload);
+            const normId = await this.createNormalizeRun(runId, rawId);
+            const points = normalizeOpenweatherAq(res.payload);
+            const inserted = await this.insertAqObservations(
+              s, providerId, airEndpointId, runId, rawId, normId, points,
+            );
+            await this.finalizeNormalizeRun(normId, inserted);
+            return inserted;
+          });
+          aqCount += count ?? 0;
+        } catch (e: any) {
+          errors.push(`[${s.code}][openweather_aq] ${e?.message ?? e}`);
+          this.logger.warn(`OpenWeather AQ failed for ${s.code}: ${e?.message}`);
+        }
+
+        // Weather
+        try {
+          const url = buildOpenweatherWeatherUrl(s.lat, s.lng, apiKey);
+          const safeUrl = url.replace(/appid=[^&]+/, "appid=***");
+          const res = await fetchOpenweather(url);
+          const count = await this.em.transactional(async () => {
+            const outId = await this.recordOutbound(
+              runId, providerId, weatherEndpointId, safeUrl, res.status, res.latency_ms, res.ok,
+            );
+            if (!res.ok) throw new Error(`OpenWeather Weather HTTP ${res.status}: ${res.payload?.message ?? "unknown"}`);
+            const rawId = await this.storeRawPayload(runId, outId, weatherEndpointId, s.id, res.payload);
+            const normId = await this.createNormalizeRun(runId, rawId);
+            const points = normalizeOpenweatherWeather(res.payload);
+            const inserted = await this.insertWeatherObservations(
+              s, providerId, weatherEndpointId, runId, rawId, normId, points,
+            );
+            await this.finalizeNormalizeRun(normId, inserted);
+            return inserted;
+          });
+          weatherCount += count ?? 0;
+        } catch (e: any) {
+          errors.push(`[${s.code}][openweather_weather] ${e?.message ?? e}`);
+          this.logger.warn(`OpenWeather weather failed for ${s.code}: ${e?.message}`);
+        }
+
+        // Light rate-limit (60 req/min free tier = 1000ms safe; ta chỉ delay 100ms)
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      const status: "succeeded" | "partial" | "failed" =
+        errors.length === 0 ? "succeeded" : aqCount + weatherCount > 0 ? "partial" : "failed";
+      await this.em.transactional(async () => {
+        await this.finalizePipelineRun(pipelineRunId, status, {
+          stations: stations.length,
+          aq_points: aqCount,
+          weather_points: weatherCount,
+          errors_count: errors.length,
+          duration_ms: Date.now() - started,
+        }, errors.length ? errors.slice(0, 5).join("; ") : undefined);
+      });
+
+      return { pipeline_run_id: pipelineRunId, stations: stations.length, aq_points: aqCount, weather_points: weatherCount, errors };
+    } catch (e: any) {
+      this.logger.error(`OpenWeather ingest failed: ${e?.message}`);
+      if (pipelineRunId) {
+        await this.em.transactional(async () => {
+          await this.finalizePipelineRun(pipelineRunId, "failed", {}, String(e?.message ?? e));
+        });
+      }
+      throw e;
+    }
+  }
+
   // ---------- Multi-provider orchestrator ----------
 
   async runAll(triggerType: "scheduled" | "manual" = "manual"): Promise<MultiSyncResult> {
     if (this.running) throw new Error("Ingest already running");
     this.running = true;
     try {
-      // 1) Open-Meteo
+      // Priority order: IQAir (primary) → OpenWeather (secondary) → Open-Meteo → WAQI
+
+      // 1) IQAir (primary)
+      let iqairResult: SyncResult | null = null;
+      if (process.env.IQAIR_API_KEY) {
+        try {
+          iqairResult = await this.runIqair(triggerType);
+        } catch (e: any) {
+          this.logger.error(`IQAir ingest error: ${e?.message}`);
+          iqairResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
+        }
+      }
+
+      // 2) OpenWeather (secondary)
+      let owmResult: SyncResult | null = null;
+      if (process.env.OPENWEATHER_API_KEY) {
+        try {
+          owmResult = await this.runOpenweather(triggerType);
+        } catch (e: any) {
+          this.logger.error(`OpenWeather ingest error: ${e?.message}`);
+          owmResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
+        }
+      }
+
+      // 3) Open-Meteo (free, no token)
       let omResult: SyncResult | null = null;
       try {
         omResult = await this.runOpenMeteo(triggerType);
@@ -519,7 +923,7 @@ export class IngestService {
         omResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
       }
 
-      // 2) WAQI
+      // 4) WAQI (optional)
       let waqiResult: SyncResult | null = null;
       if (process.env.WAQI_TOKEN) {
         try {
@@ -530,15 +934,39 @@ export class IngestService {
         }
       }
 
-      const totalAq = (omResult?.aq_points ?? 0) + (waqiResult?.aq_points ?? 0);
-      const totalWeather = omResult?.weather_points ?? 0;
-      const totalErrors = [...(omResult?.errors ?? []), ...(waqiResult?.errors ?? [])];
+      const totalAq =
+        (iqairResult?.aq_points ?? 0) +
+        (owmResult?.aq_points ?? 0) +
+        (omResult?.aq_points ?? 0) +
+        (waqiResult?.aq_points ?? 0);
+      const totalWeather =
+        (iqairResult?.weather_points ?? 0) +
+        (owmResult?.weather_points ?? 0) +
+        (omResult?.weather_points ?? 0);
+      const totalErrors = [
+        ...(iqairResult?.errors ?? []),
+        ...(owmResult?.errors ?? []),
+        ...(omResult?.errors ?? []),
+        ...(waqiResult?.errors ?? []),
+      ];
 
       this.logger.log(
-        `Multi-provider ingest done: OpenMeteo=${omResult?.aq_points ?? 0}aq+${omResult?.weather_points ?? 0}w, WAQI=${waqiResult?.aq_points ?? 0}aq, errors=${totalErrors.length}`,
+        `Multi-provider ingest done: ` +
+          `IQAir=${iqairResult?.aq_points ?? 0}aq+${iqairResult?.weather_points ?? 0}w, ` +
+          `OpenWeather=${owmResult?.aq_points ?? 0}aq+${owmResult?.weather_points ?? 0}w, ` +
+          `OpenMeteo=${omResult?.aq_points ?? 0}aq+${omResult?.weather_points ?? 0}w, ` +
+          `WAQI=${waqiResult?.aq_points ?? 0}aq, errors=${totalErrors.length}`,
       );
 
-      return { openmeteo: omResult, waqi: waqiResult, total_aq_points: totalAq, total_weather_points: totalWeather, total_errors: totalErrors };
+      return {
+        openmeteo: omResult,
+        waqi: waqiResult,
+        iqair: iqairResult,
+        openweather: owmResult,
+        total_aq_points: totalAq,
+        total_weather_points: totalWeather,
+        total_errors: totalErrors,
+      };
     } finally {
       this.running = false;
     }

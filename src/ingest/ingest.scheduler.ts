@@ -24,7 +24,11 @@ export class IngestScheduler implements OnModuleInit {
         .runAll("scheduled")
         .then((r) =>
           this.logger.log(
-            `Startup ingest: OpenMeteo=${r.openmeteo?.aq_points ?? 0}aq+${r.openmeteo?.weather_points ?? 0}w, WAQI=${r.waqi?.aq_points ?? 0}aq, errors=${r.total_errors.length}`,
+            `Startup ingest: ` +
+              `IQAir=${r.iqair?.aq_points ?? 0}aq+${r.iqair?.weather_points ?? 0}w, ` +
+              `OpenWeather=${r.openweather?.aq_points ?? 0}aq+${r.openweather?.weather_points ?? 0}w, ` +
+              `OpenMeteo=${r.openmeteo?.aq_points ?? 0}aq+${r.openmeteo?.weather_points ?? 0}w, ` +
+              `WAQI=${r.waqi?.aq_points ?? 0}aq, errors=${r.total_errors.length}`,
           ),
         )
         .catch((e) => this.logger.warn(`Startup ingest skipped: ${e?.message}`));
@@ -39,7 +43,11 @@ export class IngestScheduler implements OnModuleInit {
     try {
       const r = await this.ingest.runAll("scheduled");
       this.logger.log(
-        `Cron ingest OK: OpenMeteo=${r.openmeteo?.aq_points ?? 0}aq+${r.openmeteo?.weather_points ?? 0}w, WAQI=${r.waqi?.aq_points ?? 0}aq, errors=${r.total_errors.length}`,
+        `Cron ingest OK: ` +
+          `IQAir=${r.iqair?.aq_points ?? 0}aq+${r.iqair?.weather_points ?? 0}w, ` +
+          `OpenWeather=${r.openweather?.aq_points ?? 0}aq+${r.openweather?.weather_points ?? 0}w, ` +
+          `OpenMeteo=${r.openmeteo?.aq_points ?? 0}aq+${r.openmeteo?.weather_points ?? 0}w, ` +
+          `WAQI=${r.waqi?.aq_points ?? 0}aq, errors=${r.total_errors.length}`,
       );
     } catch (e: any) {
       this.logger.error(`Cron ingest failed: ${e?.message}`);

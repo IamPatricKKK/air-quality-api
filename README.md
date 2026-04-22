@@ -1,17 +1,30 @@
 # air-quality-api
 
-NestJS service cho:
+Service backend **CHÍNH** (NestJS) — đảm nhận:
 
-- auth / session / RBAC
-- user-facing curated APIs
-- admin business APIs
+- auth / session / RBAC (JWT RS256 + JWKS)
+- **ingestion dữ liệu từ 4 provider bên thứ ba** (IQAir, OpenWeather, Open-Meteo, WAQI)
+- user-facing curated APIs (cho `air-quality-fe`)
+- admin business APIs (cho khu "Vận hành" của `air-quality-admin`)
+- notification dispatch (email SMTP)
 
-Repo này đọc dữ liệu đã chuẩn hóa từ PostgreSQL và phát hành JWT/JWKS cho `air-quality-fe` và `air-quality-admin`.
+Repo này vừa ghi raw payloads + normalized observations xuống PostgreSQL, vừa đọc dữ liệu phục vụ FE/Admin. Service analytics riêng biệt (`air-quality-be`) đọc dữ liệu này và ghi predictions/analytics ngược lại DB.
+
+## Provider matrix (priority từ cao xuống thấp)
+
+| Priority | Provider | Loại | Token | Free tier | Cron mặc định |
+|---|---|---|---|---|---|
+| 50  | **IQAir (AirVisual)** | AQI + Weather realtime | Bắt buộc | 10k/tháng | 6h/lần |
+| 100 | Open-Meteo | AQI + Weather hourly | Không | Không giới hạn hợp lý | 12h/lần |
+| 150 | **OpenWeatherMap** | AQI + Weather current | Bắt buộc | 1k/ngày | 3h/lần |
+| 200 | WAQI | AQI realtime | Bắt buộc | Rate-limited | 12h/lần |
+
+Khi cả 4 provider cùng có dữ liệu cho 1 station × 1 giờ, view `core.v_aq_observations_fused` sẽ chọn dữ liệu theo thứ tự ưu tiên trên.
 
 ## Tech stack
 
-- NestJS 11
-- PostgreSQL 16
+- NestJS 11 (+ @nestjs/schedule cho cron)
+- MikroORM 6 + PostgreSQL 16
 - Docker Compose
 
 ## Prerequisites
