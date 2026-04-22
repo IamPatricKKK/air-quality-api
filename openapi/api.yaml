@@ -3,7 +3,7 @@ info:
   title: air-quality-api
   version: 0.1.0
 servers:
-  - url: http://localhost:3001/api/v1
+  - url: http://localhost:3002/api/v1
 paths:
   /health:
     get:
@@ -37,6 +37,8 @@ paths:
   /auth/me:
     get:
       summary: Current authenticated user
+      security:
+        - bearerAuth: []
       responses:
         "200":
           description: Current user
@@ -72,41 +74,55 @@ paths:
   /users/preferences:
     get:
       summary: Get user preferences
+      security:
+        - bearerAuth: []
       responses:
         "200":
           description: Preferences
     patch:
       summary: Update user preferences
+      security:
+        - bearerAuth: []
       responses:
         "200":
           description: Updated preferences
   /notifications:
     get:
       summary: Get user notifications
+      security:
+        - bearerAuth: []
       responses:
         "200":
           description: User notifications
   /admin/dashboard:
     get:
       summary: Admin dashboard summary
+      security:
+        - bearerAuth: []
       responses:
         "200":
           description: Dashboard payload
   /admin/users:
     get:
       summary: Admin user list
+      security:
+        - bearerAuth: []
       responses:
         "200":
           description: User list
   /admin/stations:
     get:
       summary: Admin station master list
+      security:
+        - bearerAuth: []
       responses:
         "200":
           description: Station list
   /admin/notifications:
     get:
       summary: Admin notification history
+      security:
+        - bearerAuth: []
       responses:
         "200":
           description: Notification list
@@ -116,3 +132,9 @@ paths:
       responses:
         "200":
           description: JWKS payload
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT

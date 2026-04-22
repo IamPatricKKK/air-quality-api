@@ -1,12 +1,18 @@
 import { randomUUID } from "crypto";
-import { Body, Controller, Get, Post, Query, UnauthorizedException } from "@nestjs/common";
-import { execute, hasDatabase, queryRow, withTransaction } from "../db/database";
+import { Body, Controller, Get, Headers, Post, Query, UnauthorizedException, Inject } from "@nestjs/common";
+import { EntityManager } from "@mikro-orm/core";
+import { hasDatabase } from "../db/database";
+import { issueAccessToken, mapClaimsToUser, requireAuth, resolveActingUserId } from "./jwt";
+import { User } from "../entities/iam/user.entity";
+import { UserProfile } from "../entities/iam/user-profile.entity";
+import { Role } from "../entities/iam/role.entity";
+import { UserRole } from "../entities/iam/user-role.entity";
 
 interface DbAuthUser {
   id: string;
   email: string;
-  display_name: string | null;
-  roles: string[] | null;
+  displayName: string;
+  roles: string[];
 }
 
 function buildAuthResponse(user: {
@@ -15,6 +21,8 @@ function buildAuthResponse(user: {
   displayName: string;
   roles: string[];
 }) {
+  const session = issueAccessToken(user);
+
   return {
     user: {
       id: user.id,
@@ -26,14 +34,16 @@ function buildAuthResponse(user: {
       },
     },
     session: {
-      access_token: `session-${randomUUID()}`,
-      expires_at: new Date(Date.now() + 1000 * 60 * 60 * 8).toISOString(),
+      access_token: session.token,
+      token_type: "bearer",
+      expires_at: session.expiresAt,
     },
   };
 }
 
-async function loadUserByEmail(email: string, password: string) {
-  return queryRow<DbAuthUser>(
+async function loadUserByEmail(em: EntityManager, email: string, password: string): Promise<DbAuthUser | null> {
+  // Use raw SQL for PostgreSQL crypt() function verification
+  const result = await em.getConnection().execute<{ id: string; email: string; display_name?: string; roles?: string[] }>(
     `
       SELECT
         u.id::text,
@@ -51,10 +61,24 @@ async function loadUserByEmail(email: string, password: string) {
     `,
     [email, password],
   );
+
+  if (!result || result.length === 0) {
+    return null;
+  }
+
+  const row = result[0];
+  return {
+    id: row.id,
+    email: row.email,
+    displayName: row.display_name ?? email.split("@")[0],
+    roles: row.roles ?? ["user"],
+  };
 }
 
 @Controller("auth")
 export class AuthController {
+  constructor(@Inject(EntityManager) private readonly em: EntityManager) {}
+
   @Post("login")
   async login(@Body() body: { email: string; password?: string }) {
     if (hasDatabase()) {
@@ -62,24 +86,17 @@ export class AuthController {
         throw new UnauthorizedException("Password is required");
       }
 
-      const row = await loadUserByEmail(body.email, body.password);
+      const row = await loadUserByEmail(this.em, body.email, body.password);
       if (row) {
-        await execute(
-          `
-            UPDATE iam.users
-            SET last_login_at = now(),
-                updated_at = now()
-            WHERE id = $1::uuid
-          `,
-          [row.id],
-        );
+        // Update last login timestamp
+        const user = await this.em.findOne(User, { id: row.id });
+        if (user) {
+          user.lastLoginAt = new Date();
+          user.updatedAt = new Date();
+          await this.em.persistAndFlush(user);
+        }
 
-        return buildAuthResponse({
-          id: row.id,
-          email: row.email,
-          displayName: row.display_name ?? row.email.split("@")[0],
-          roles: row.roles ?? ["user"],
-        });
+        return buildAuthResponse(row);
       }
 
       throw new UnauthorizedException("Invalid credentials");
@@ -105,56 +122,72 @@ export class AuthController {
           ? "analyst"
           : "user";
 
-    const createdUser = await withTransaction(async (client) => {
-      const user = await client.query<{ id: string; email: string }>(
-        `
-          WITH inserted AS (
+    const createdUser = await this.em.transactional(async (em) => {
+      // Check if user already exists
+      let user = await em.findOne(User, { email: body.email });
+
+      if (!user) {
+        // Create new user with hashed password using PostgreSQL crypt function
+        const result = await em.getConnection().execute<{ id: string }>(
+          `
             INSERT INTO iam.users (email, password_hash, status)
             VALUES ($1, crypt($2, gen_salt('bf')), 'active')
             ON CONFLICT (email) DO NOTHING
-            RETURNING id::text, email
-          )
-          SELECT id, email
-          FROM inserted
-          UNION ALL
-          SELECT id::text, email
-          FROM iam.users
-          WHERE email = $1
-          LIMIT 1
-        `,
-        [body.email, password],
-      );
+            RETURNING id
+          `,
+          [body.email, password],
+        );
 
-      const userRow = user.rows[0];
-      if (!userRow) {
+        if (!result || result.length === 0) {
+          // User already exists from concurrent operation
+          user = await em.findOne(User, { email: body.email });
+          if (!user) {
+            return null;
+          }
+        } else {
+          // Fetch the newly created user
+          user = await em.findOne(User, { id: result[0].id });
+          if (!user) {
+            return null;
+          }
+        }
+      }
+
+      // Create or update user profile
+      let profile = await em.findOne(UserProfile, { user: { id: user.id } });
+      if (!profile) {
+        profile = em.create(UserProfile, {
+          user: user.id,
+          displayName: body.displayName ?? body.email.split("@")[0],
+        });
+      } else {
+        profile.displayName = body.displayName ?? body.email.split("@")[0];
+      }
+      await em.persistAndFlush(profile);
+
+      // Get or create role
+      const role = await em.findOne(Role, { code: roleCode });
+      if (!role) {
         return null;
       }
 
-      await client.query(
-        `
-          INSERT INTO iam.user_profiles (user_id, display_name)
-          VALUES ($1::uuid, $2)
-          ON CONFLICT (user_id) DO UPDATE SET
-            display_name = EXCLUDED.display_name,
-            updated_at = now()
-        `,
-        [userRow.id, body.displayName ?? body.email.split("@")[0]],
-      );
+      // Create user role assignment if not exists
+      const existingUserRole = await em.findOne(UserRole, {
+        user: { id: user.id },
+        role: { id: role.id },
+      });
 
-      await client.query(
-        `
-          INSERT INTO iam.user_roles (user_id, role_id)
-          SELECT $1::uuid, id
-          FROM iam.roles
-          WHERE code = $2
-          ON CONFLICT (user_id, role_id) DO NOTHING
-        `,
-        [userRow.id, roleCode],
-      );
+      if (!existingUserRole) {
+        const userRole = em.create(UserRole, {
+          user: user.id,
+          role: role.id,
+        });
+        await em.persistAndFlush(userRole);
+      }
 
       return {
-        id: userRow.id,
-        email: userRow.email,
+        id: user.id,
+        email: user.email,
         displayName: body.displayName ?? body.email.split("@")[0],
         roles: [roleCode],
       };
@@ -177,34 +210,38 @@ export class AuthController {
   }
 
   @Get("me")
-  async me(@Query("userId") userId?: string) {
-    if (userId) {
-      const row = await queryRow<DbAuthUser>(
-        `
-          SELECT
-            u.id::text,
-            u.email,
-            up.display_name,
-            ARRAY_REMOVE(ARRAY_AGG(r.code), NULL) AS roles
-          FROM iam.users u
-          LEFT JOIN iam.user_profiles up ON up.user_id = u.id
-          LEFT JOIN iam.user_roles ur ON ur.user_id = u.id
-          LEFT JOIN iam.roles r ON r.id = ur.role_id
-          WHERE u.id = $1::uuid
-          GROUP BY u.id, up.display_name
-          LIMIT 1
-        `,
-        [userId],
-      );
+  async me(@Headers("authorization") authHeader?: string, @Query("userId") userId?: string) {
+    if (authHeader) {
+      const claims = requireAuth(authHeader);
+      const effectiveUserId = resolveActingUserId(userId, claims);
+      const row = await this.loadUserById(effectiveUserId);
 
       if (row) {
         return {
           id: row.id,
           email: row.email,
-          roles: row.roles ?? ["user"],
-          displayName: row.display_name ?? row.email.split("@")[0],
+          roles: row.roles,
+          displayName: row.displayName,
           user_metadata: {
-            display_name: row.display_name ?? row.email.split("@")[0],
+            display_name: row.displayName,
+          },
+        };
+      }
+
+      return mapClaimsToUser(claims);
+    }
+
+    if (userId) {
+      const row = await this.loadUserById(userId);
+
+      if (row) {
+        return {
+          id: row.id,
+          email: row.email,
+          roles: row.roles,
+          displayName: row.displayName,
+          user_metadata: {
+            display_name: row.displayName,
           },
         };
       }
@@ -224,5 +261,38 @@ export class AuthController {
   @Post("logout")
   logout() {
     return { ok: true };
+  }
+
+  private async loadUserById(userId: string): Promise<DbAuthUser | null> {
+    // Use raw SQL for aggregating roles efficiently
+    const result = await this.em.getConnection().execute<{ id: string; email: string; display_name?: string; roles?: string[] }>(
+      `
+        SELECT
+          u.id::text,
+          u.email,
+          up.display_name,
+          ARRAY_REMOVE(ARRAY_AGG(r.code), NULL) AS roles
+        FROM iam.users u
+        LEFT JOIN iam.user_profiles up ON up.user_id = u.id
+        LEFT JOIN iam.user_roles ur ON ur.user_id = u.id
+        LEFT JOIN iam.roles r ON r.id = ur.role_id
+        WHERE u.id = $1::uuid
+        GROUP BY u.id, up.display_name
+        LIMIT 1
+      `,
+      [userId],
+    );
+
+    if (!result || result.length === 0) {
+      return null;
+    }
+
+    const row = result[0];
+    return {
+      id: row.id,
+      email: row.email,
+      displayName: row.display_name ?? row.email.split("@")[0],
+      roles: row.roles ?? ["user"],
+    };
   }
 }

@@ -1,6 +1,8 @@
-import { Body, Controller, Get, Patch, Query } from "@nestjs/common";
-import { userPreferences } from "../mock/mock.data";
-import { queryRows, withTransaction } from "../db/database";
+import { Body, Controller, Get, Headers, Patch, Query } from "@nestjs/common";
+import { EntityManager } from "@mikro-orm/postgresql";
+import { wrap } from "@mikro-orm/core";
+import { User, UserPreference, UserPinnedStation, Station } from "../entities";
+import { requireAuth, resolveActingUserId } from "../auth/jwt";
 
 interface PreferencesRow {
   notification_mode: string;
@@ -27,6 +29,16 @@ interface PreferencesPayload {
   } | null;
 }
 
+const DEFAULT_PREFERENCES = {
+  notificationMode: "all",
+  favoriteRegions: [] as string[],
+  pushEnabled: true,
+  emailEnabled: true,
+  dailyReportEnabled: true,
+  pinnedStationIds: [] as string[],
+  location: undefined as { lat: number; lng: number } | undefined,
+};
+
 function mapPreferences(row: PreferencesRow) {
   return {
     notificationMode: row.notification_mode,
@@ -42,68 +54,62 @@ function mapPreferences(row: PreferencesRow) {
   };
 }
 
-async function readPreferences(userId?: string) {
-  const rows = await queryRows<PreferencesRow>(
-    `
-      SELECT
-        up.notification_mode,
-        up.favorite_regions,
-        up.push_enabled,
-        up.email_enabled,
-        up.daily_report_enabled,
-        up.location_lat,
-        up.location_lng,
-        ARRAY_REMOVE(ARRAY_AGG(ups.station_id::text ORDER BY ups.sort_order), NULL) AS pinned_station_ids
-      FROM app.user_preferences up
-      LEFT JOIN app.user_pinned_stations ups ON ups.user_id = up.user_id
-      WHERE ($1::uuid IS NULL OR up.user_id = $1::uuid)
-      GROUP BY up.user_id, up.notification_mode, up.favorite_regions, up.push_enabled, up.email_enabled, up.daily_report_enabled, up.location_lat, up.location_lng, up.created_at
-      ORDER BY up.created_at ASC
-      LIMIT 1
-    `,
-    [userId ?? null],
-  );
-
-  return rows?.[0] ?? null;
-}
-
 @Controller("users")
 export class UsersController {
-  @Get("preferences")
-  async getPreferences(@Query("userId") userId?: string) {
-    const row = await readPreferences(userId);
+  constructor(private readonly em: EntityManager) {}
 
+  @Get("preferences")
+  async getPreferences(@Headers("authorization") authHeader?: string, @Query("userId") userId?: string) {
+    const claims = requireAuth(authHeader);
+    const effectiveUserId = resolveActingUserId(userId, claims);
+
+    const rows = await this.em.getConnection().execute<PreferencesRow>(
+      `
+        SELECT
+          up.notification_mode,
+          up.favorite_regions,
+          up.push_enabled,
+          up.email_enabled,
+          up.daily_report_enabled,
+          up.location_lat,
+          up.location_lng,
+          ARRAY_REMOVE(ARRAY_AGG(ups.station_id::text ORDER BY ups.sort_order), NULL) AS pinned_station_ids
+        FROM app.user_preferences up
+        LEFT JOIN app.user_pinned_stations ups ON ups.user_id = up.user_id
+        WHERE ($1::uuid IS NULL OR up.user_id = $1::uuid)
+        GROUP BY up.user_id, up.notification_mode, up.favorite_regions, up.push_enabled, up.email_enabled, up.daily_report_enabled, up.location_lat, up.location_lng, up.created_at
+        ORDER BY up.created_at ASC
+        LIMIT 1
+      `,
+      [effectiveUserId ?? null],
+    );
+
+    const row = rows?.[0];
     if (row) {
       return mapPreferences(row);
     }
 
-    return userPreferences;
+    return DEFAULT_PREFERENCES;
   }
 
   @Patch("preferences")
-  async updatePreferences(@Body() body: PreferencesPayload, @Query("userId") userIdFromQuery?: string) {
-    const userId = body.userId ?? userIdFromQuery;
+  async updatePreferences(
+    @Headers("authorization") authHeader?: string,
+    @Body() body?: PreferencesPayload,
+    @Query("userId") userIdFromQuery?: string,
+  ) {
+    const claims = requireAuth(authHeader);
+    const payload = body ?? {};
+    const userId = resolveActingUserId(payload.userId ?? userIdFromQuery, claims);
 
-    const nextPreferences = await withTransaction(async (client) => {
-      if (!userId) {
+    const nextPreferences = await this.em.transactional(async (em) => {
+      const user = await em.findOne(User, { id: userId });
+
+      if (!user) {
         return null;
       }
 
-      const user = await client.query<{ id: string }>(
-        `
-          SELECT id
-          FROM iam.users
-          WHERE id = $1::uuid
-          LIMIT 1
-        `,
-        [userId],
-      );
-
-      if (user.rowCount === 0) {
-        return null;
-      }
-
-      const current = await client.query<PreferencesRow>(
+      const currentRows = await em.getConnection().execute<PreferencesRow>(
         `
           SELECT
             up.notification_mode,
@@ -123,79 +129,65 @@ export class UsersController {
         [userId],
       );
 
-      const currentRow = current.rows[0];
-      const fallbackLocation = userPreferences.location;
+      const currentRow = currentRows?.[0];
       const resolvedLocation =
-        body.location === null
+        payload.location === null
           ? null
-          : body.location ?? (
+          : payload.location ?? (
               currentRow?.location_lat != null && currentRow?.location_lng != null
                 ? { lat: currentRow.location_lat, lng: currentRow.location_lng }
-                : fallbackLocation
+                : DEFAULT_PREFERENCES.location
             );
 
       const resolved = {
-        notificationMode: body.notificationMode ?? currentRow?.notification_mode ?? userPreferences.notificationMode,
-        favoriteRegions: body.favoriteRegions ?? currentRow?.favorite_regions ?? userPreferences.favoriteRegions,
-        pushEnabled: body.pushEnabled ?? currentRow?.push_enabled ?? userPreferences.pushEnabled,
-        emailEnabled: body.emailEnabled ?? currentRow?.email_enabled ?? userPreferences.emailEnabled,
-        dailyReportEnabled: body.dailyReportEnabled ?? currentRow?.daily_report_enabled ?? true,
-        pinnedStationIds: body.pinnedStationIds ?? currentRow?.pinned_station_ids ?? userPreferences.pinnedStationIds,
+        notificationMode: payload.notificationMode ?? currentRow?.notification_mode ?? DEFAULT_PREFERENCES.notificationMode,
+        favoriteRegions: payload.favoriteRegions ?? currentRow?.favorite_regions ?? DEFAULT_PREFERENCES.favoriteRegions,
+        pushEnabled: payload.pushEnabled ?? currentRow?.push_enabled ?? DEFAULT_PREFERENCES.pushEnabled,
+        emailEnabled: payload.emailEnabled ?? currentRow?.email_enabled ?? DEFAULT_PREFERENCES.emailEnabled,
+        dailyReportEnabled: payload.dailyReportEnabled ?? currentRow?.daily_report_enabled ?? true,
+        pinnedStationIds: payload.pinnedStationIds ?? currentRow?.pinned_station_ids ?? DEFAULT_PREFERENCES.pinnedStationIds,
         location: resolvedLocation,
       };
 
-      await client.query(
-        `
-          INSERT INTO app.user_preferences (
-            user_id,
-            notification_mode,
-            favorite_regions,
-            push_enabled,
-            email_enabled,
-            daily_report_enabled,
-            location_lat,
-            location_lng
-          )
-          VALUES ($1::uuid, $2, $3::text[], $4, $5, $6, $7, $8)
-          ON CONFLICT (user_id) DO UPDATE SET
-            notification_mode = EXCLUDED.notification_mode,
-            favorite_regions = EXCLUDED.favorite_regions,
-            push_enabled = EXCLUDED.push_enabled,
-            email_enabled = EXCLUDED.email_enabled,
-            daily_report_enabled = EXCLUDED.daily_report_enabled,
-            location_lat = EXCLUDED.location_lat,
-            location_lng = EXCLUDED.location_lng,
-            updated_at = now()
-        `,
-        [
-          userId,
-          resolved.notificationMode,
-          resolved.favoriteRegions,
-          resolved.pushEnabled,
-          resolved.emailEnabled,
-          resolved.dailyReportEnabled,
-          resolved.location?.lat ?? null,
-          resolved.location?.lng ?? null,
-        ],
-      );
+      let pref = await em.findOne(UserPreference, { user: userId });
 
-      await client.query(
-        `
-          DELETE FROM app.user_pinned_stations
-          WHERE user_id = $1::uuid
-        `,
-        [userId],
-      );
+      if (!pref) {
+        pref = em.create(UserPreference, {
+          user: userId,
+          notificationMode: resolved.notificationMode,
+          favoriteRegions: resolved.favoriteRegions,
+          pushEnabled: resolved.pushEnabled,
+          emailEnabled: resolved.emailEnabled,
+          dailyReportEnabled: resolved.dailyReportEnabled,
+          locationLat: resolved.location?.lat ?? null,
+          locationLng: resolved.location?.lng ?? null,
+        });
+        await em.persistAndFlush(pref);
+      } else {
+        wrap(pref).assign({
+          notificationMode: resolved.notificationMode,
+          favoriteRegions: resolved.favoriteRegions,
+          pushEnabled: resolved.pushEnabled,
+          emailEnabled: resolved.emailEnabled,
+          dailyReportEnabled: resolved.dailyReportEnabled,
+          locationLat: resolved.location?.lat ?? null,
+          locationLng: resolved.location?.lng ?? null,
+        });
+        await em.flush();
+      }
+
+      const existingPinned = await em.find(UserPinnedStation, { user: userId });
+      for (const pinned of existingPinned) {
+        await em.removeAndFlush(pinned);
+      }
 
       for (const [index, stationId] of resolved.pinnedStationIds.entries()) {
-        await client.query(
-          `
-            INSERT INTO app.user_pinned_stations (user_id, station_id, sort_order)
-            VALUES ($1::uuid, $2::uuid, $3)
-            ON CONFLICT (user_id, station_id) DO UPDATE SET sort_order = EXCLUDED.sort_order
-          `,
-          [userId, stationId, index],
-        );
+        const pinned = em.create(UserPinnedStation, {
+          user: userId,
+          station: stationId,
+          sortOrder: index,
+        });
+        await em.persistAndFlush(pinned);
       }
 
       return resolved;
@@ -206,8 +198,8 @@ export class UsersController {
     }
 
     return {
-      ...userPreferences,
-      ...body,
+      ...DEFAULT_PREFERENCES,
+      ...payload,
     };
   }
 }

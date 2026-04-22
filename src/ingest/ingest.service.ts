@@ -1,0 +1,693 @@
+import { Injectable, Logger } from "@nestjs/common";
+import { EntityManager } from "@mikro-orm/postgresql";
+import {
+  AQ_BASE_URL,
+  AQ_ENDPOINT_CODE,
+  AQ_PARSER_KEY,
+  AQ_PATH,
+  AqPoint,
+  DEFAULT_AQ_FIELDS,
+  DEFAULT_WEATHER_FIELDS,
+  OPENMETEO_PROVIDER_BASE_URL,
+  OPENMETEO_PROVIDER_CATEGORY,
+  OPENMETEO_PROVIDER_CODE,
+  OPENMETEO_PROVIDER_NAME,
+  WEATHER_BASE_URL,
+  WEATHER_ENDPOINT_CODE,
+  WEATHER_PARSER_KEY,
+  WEATHER_PATH,
+  WeatherPoint,
+  buildAqUrl,
+  buildWeatherUrl,
+  fetchOpenMeteo,
+  normalizeAq,
+  normalizeWeather,
+  sha256Hex,
+} from "./openmeteo";
+import {
+  WAQI_PROVIDER_CODE,
+  WAQI_PROVIDER_NAME,
+  WAQI_PROVIDER_CATEGORY,
+  WAQI_PROVIDER_BASE_URL,
+  WAQI_ENDPOINT_CODE,
+  WAQI_PARSER_KEY,
+  buildWaqiFeedUrl,
+  fetchWaqi,
+  normalizeWaqiAq,
+} from "./waqi";
+import {
+  SourceProvider,
+  SourceEndpoint,
+  StationSourceBinding,
+  PipelineRun,
+  OutboundRequest,
+  RawPayload,
+  NormalizeRun,
+  AirQualityObservation,
+  WeatherObservation,
+  Station,
+} from "../entities";
+
+interface StationRow {
+  id: string;
+  code: string;
+  lat: number;
+  lng: number;
+  timezone: string | null;
+}
+
+export interface SyncResult {
+  pipeline_run_id: string;
+  stations: number;
+  aq_points: number;
+  weather_points: number;
+  errors: string[];
+}
+
+export interface MultiSyncResult {
+  openmeteo: SyncResult | null;
+  waqi: SyncResult | null;
+  total_aq_points: number;
+  total_weather_points: number;
+  total_errors: string[];
+}
+
+function pastHours(): number {
+  const v = Number(process.env.OPENMETEO_PAST_HOURS ?? 24);
+  return Math.min(168, Math.max(1, Number.isFinite(v) ? v : 24));
+}
+
+@Injectable()
+export class IngestService {
+  private readonly logger = new Logger(IngestService.name);
+  private running = false;
+
+  constructor(private readonly em: EntityManager) {}
+
+  isRunning() {
+    return this.running;
+  }
+
+  async ensureProviderAndEndpoints() {
+    // Upsert provider using raw SQL (ON CONFLICT support)
+    await this.em.getConnection().execute(
+      `INSERT INTO ingest.source_providers (code, name, category, base_url, is_active, config)
+       VALUES ($1,$2,$3,$4,TRUE,'{}'::jsonb)
+       ON CONFLICT (code) DO NOTHING`,
+      [OPENMETEO_PROVIDER_CODE, OPENMETEO_PROVIDER_NAME, OPENMETEO_PROVIDER_CATEGORY, OPENMETEO_PROVIDER_BASE_URL],
+    );
+
+    const provider = await this.em.findOne(
+      SourceProvider,
+      { code: OPENMETEO_PROVIDER_CODE },
+    );
+    if (!provider) throw new Error("Failed to ensure provider");
+    const providerId = provider.id;
+
+    const upsertEndpoint = async (
+      code: string,
+      name: string,
+      baseUrl: string,
+      path: string,
+      parserKey: string,
+    ) => {
+      await this.em.getConnection().execute(
+        `INSERT INTO ingest.source_endpoints
+          (source_provider_id, code, name, base_url, path, http_method, parser_key, is_active, config)
+        VALUES ($1,$2,$3,$4,$5,'GET',$6,TRUE,'{}'::jsonb)
+        ON CONFLICT (code) DO UPDATE
+        SET name = EXCLUDED.name,
+            base_url = EXCLUDED.base_url,
+            path = EXCLUDED.path,
+            parser_key = EXCLUDED.parser_key,
+            is_active = TRUE`,
+        [providerId, code, name, baseUrl, path, parserKey],
+      );
+    };
+
+    await upsertEndpoint(
+      AQ_ENDPOINT_CODE,
+      "Open-Meteo Air Quality (hourly)",
+      AQ_BASE_URL,
+      AQ_PATH,
+      AQ_PARSER_KEY,
+    );
+    await upsertEndpoint(
+      WEATHER_ENDPOINT_CODE,
+      "Open-Meteo Weather Forecast (hourly)",
+      WEATHER_BASE_URL,
+      WEATHER_PATH,
+      WEATHER_PARSER_KEY,
+    );
+
+    const endpoints = await this.em.find(
+      SourceEndpoint,
+      { code: { $in: [AQ_ENDPOINT_CODE, WEATHER_ENDPOINT_CODE] } },
+    );
+
+    const map: Record<string, string> = {};
+    for (const e of endpoints) map[e.code] = e.id;
+    return { providerId, aqEndpointId: map[AQ_ENDPOINT_CODE], weatherEndpointId: map[WEATHER_ENDPOINT_CODE] };
+  }
+
+  async ensureBindings(
+    stations: StationRow[],
+    providerId: string,
+    aqEndpointId: string,
+    weatherEndpointId: string,
+  ) {
+    for (const s of stations) {
+      for (const endpointId of [aqEndpointId, weatherEndpointId]) {
+        await this.em.getConnection().execute(
+          `INSERT INTO ingest.station_source_bindings
+            (station_id, source_provider_id, source_endpoint_id, is_enabled, priority, valid_from, config)
+          VALUES ($1,$2,$3,TRUE,100,now(),'{}'::jsonb)
+          ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
+          [s.id, providerId, endpointId],
+        );
+      }
+    }
+  }
+
+  private async createPipelineRun(
+    providerId: string,
+    endpointId: string,
+    triggerType: string,
+  ): Promise<string> {
+    const result = await this.em.getConnection().execute(
+      `INSERT INTO ingest.pipeline_runs (source_provider_id, source_endpoint_id, trigger_type, status, started_at, stats)
+       VALUES ($1,$2,$3,'running',now(),'{}'::jsonb)
+       RETURNING id`,
+      [providerId, endpointId, triggerType],
+    );
+    return result.rows[0].id;
+  }
+
+  private async finalizePipelineRun(
+    runId: string,
+    status: "succeeded" | "failed" | "partial",
+    stats: Record<string, unknown>,
+    errorMessage?: string,
+  ) {
+    await this.em.getConnection().execute(
+      `UPDATE ingest.pipeline_runs
+       SET status=$2, finished_at=now(), stats=$3::jsonb, error_message=$4
+       WHERE id=$1`,
+      [runId, status, JSON.stringify(stats), errorMessage ?? null],
+    );
+  }
+
+  private async recordOutbound(
+    pipelineRunId: string,
+    providerId: string,
+    endpointId: string,
+    url: string,
+    statusCode: number,
+    latencyMs: number,
+    ok: boolean,
+  ): Promise<string> {
+    const result = await this.em.getConnection().execute(
+      `INSERT INTO ingest.outbound_requests
+        (pipeline_run_id, source_provider_id, source_endpoint_id, request_url, http_method,
+         request_headers, request_body, response_status, response_headers, latency_ms, succeeded, requested_at)
+      VALUES ($1,$2,$3,$4,'GET','{}'::jsonb, NULL, $5, '{}'::jsonb, $6, $7, now())
+      RETURNING id`,
+      [pipelineRunId, providerId, endpointId, url, statusCode, latencyMs, ok],
+    );
+    return result.rows[0].id;
+  }
+
+  private async storeRawPayload(
+    pipelineRunId: string,
+    outboundId: string,
+    endpointId: string,
+    stationId: string,
+    payload: unknown,
+  ): Promise<string> {
+    const body = JSON.stringify(payload);
+    const hash = sha256Hex(`${endpointId}:${stationId}:${body}`);
+
+    // Try to upsert using raw SQL for on-conflict semantics
+    const result = await this.em.getConnection().execute(
+      `INSERT INTO ingest.raw_payloads
+        (pipeline_run_id, outbound_request_id, source_endpoint_id, station_id, payload, payload_hash, received_at)
+      VALUES ($1,$2,$3,$4,$5::jsonb,$6, now())
+      ON CONFLICT (payload_hash) DO UPDATE SET received_at = EXCLUDED.received_at
+      RETURNING id`,
+      [pipelineRunId, outboundId, endpointId, stationId, body, hash],
+    );
+    return result.rows[0].id;
+  }
+
+  private async createNormalizeRun(
+    pipelineRunId: string,
+    rawPayloadId: string,
+  ): Promise<string> {
+    const result = await this.em.getConnection().execute(
+      `INSERT INTO ingest.normalize_runs (pipeline_run_id, raw_payload_id, status, started_at)
+       VALUES ($1,$2,'running',now())
+       RETURNING id`,
+      [pipelineRunId, rawPayloadId],
+    );
+    return result.rows[0].id;
+  }
+
+  private async finalizeNormalizeRun(id: string, inserted: number) {
+    await this.em.getConnection().execute(
+      `UPDATE ingest.normalize_runs SET status='succeeded', finished_at=now(), records_written=$2 WHERE id=$1`,
+      [id, inserted],
+    );
+  }
+
+  private async insertAqObservations(
+    station: StationRow,
+    providerId: string,
+    endpointId: string,
+    pipelineRunId: string,
+    rawPayloadId: string,
+    normalizeRunId: string,
+    points: AqPoint[],
+  ): Promise<number> {
+    let inserted = 0;
+    for (const p of points) {
+      // Use raw SQL for complex ON CONFLICT with many field updates
+      const result = await this.em.getConnection().execute(
+        `INSERT INTO core.air_quality_observations
+          (station_id, source_provider_id, source_endpoint_id, pipeline_run_id, raw_payload_id, normalize_run_id,
+           observed_at, aqi, pm25, pm10, o3, no2, so2, co,
+           european_aqi, ammonia, dust, aerosol_optical_depth, uv_index, lineage)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'{}'::jsonb)
+        ON CONFLICT (station_id, observed_at, source_endpoint_id) DO UPDATE SET
+          aqi = EXCLUDED.aqi,
+          pm25 = EXCLUDED.pm25,
+          pm10 = EXCLUDED.pm10,
+          o3 = EXCLUDED.o3,
+          no2 = EXCLUDED.no2,
+          so2 = EXCLUDED.so2,
+          co = EXCLUDED.co,
+          european_aqi = EXCLUDED.european_aqi,
+          ammonia = EXCLUDED.ammonia,
+          dust = EXCLUDED.dust,
+          aerosol_optical_depth = EXCLUDED.aerosol_optical_depth,
+          uv_index = EXCLUDED.uv_index,
+          raw_payload_id = EXCLUDED.raw_payload_id,
+          normalize_run_id = EXCLUDED.normalize_run_id,
+          pipeline_run_id = EXCLUDED.pipeline_run_id,
+          fetched_at = now()
+        RETURNING id`,
+        [
+          station.id, providerId, endpointId, pipelineRunId, rawPayloadId, normalizeRunId,
+          p.observed_at, p.aqi, p.pm25, p.pm10, p.o3, p.no2, p.so2, p.co,
+          p.european_aqi, p.ammonia, p.dust, p.aerosol_optical_depth, p.uv_index,
+        ],
+      );
+      if (result.rowCount) inserted++;
+    }
+    return inserted;
+  }
+
+  private async insertWeatherObservations(
+    station: StationRow,
+    providerId: string,
+    endpointId: string,
+    pipelineRunId: string,
+    rawPayloadId: string,
+    normalizeRunId: string,
+    points: WeatherPoint[],
+  ): Promise<number> {
+    let inserted = 0;
+    for (const p of points) {
+      // Use raw SQL for complex ON CONFLICT with many field updates
+      const result = await this.em.getConnection().execute(
+        `INSERT INTO core.weather_observations
+          (station_id, source_provider_id, source_endpoint_id, pipeline_run_id, raw_payload_id, normalize_run_id,
+           observed_at, temperature_c, humidity_pct, wind_speed_mps, wind_direction_deg, pressure_hpa,
+           visibility_km, precipitation_mm, cloud_cover_pct, weather_code,
+           apparent_temperature_c, dew_point_c, wind_gusts_mps, surface_pressure_hpa, rain_mm, lineage)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,'{}'::jsonb)
+        ON CONFLICT (station_id, observed_at, source_endpoint_id) DO UPDATE SET
+          temperature_c = EXCLUDED.temperature_c,
+          humidity_pct = EXCLUDED.humidity_pct,
+          wind_speed_mps = EXCLUDED.wind_speed_mps,
+          wind_direction_deg = EXCLUDED.wind_direction_deg,
+          pressure_hpa = EXCLUDED.pressure_hpa,
+          visibility_km = EXCLUDED.visibility_km,
+          precipitation_mm = EXCLUDED.precipitation_mm,
+          cloud_cover_pct = EXCLUDED.cloud_cover_pct,
+          weather_code = EXCLUDED.weather_code,
+          apparent_temperature_c = EXCLUDED.apparent_temperature_c,
+          dew_point_c = EXCLUDED.dew_point_c,
+          wind_gusts_mps = EXCLUDED.wind_gusts_mps,
+          surface_pressure_hpa = EXCLUDED.surface_pressure_hpa,
+          rain_mm = EXCLUDED.rain_mm,
+          raw_payload_id = EXCLUDED.raw_payload_id,
+          normalize_run_id = EXCLUDED.normalize_run_id,
+          pipeline_run_id = EXCLUDED.pipeline_run_id,
+          fetched_at = now()
+        RETURNING id`,
+        [
+          station.id, providerId, endpointId, pipelineRunId, rawPayloadId, normalizeRunId,
+          p.observed_at, p.temperature_c, p.humidity_pct, p.wind_speed_mps, p.wind_direction_deg,
+          p.pressure_hpa, p.visibility_km, p.precipitation_mm, p.cloud_cover_pct, p.weather_code,
+          p.apparent_temperature_c, p.dew_point_c, p.wind_gusts_mps, p.surface_pressure_hpa, p.rain_mm,
+        ],
+      );
+      if (result.rowCount) inserted++;
+    }
+    return inserted;
+  }
+
+  // ---------- WAQI provider setup ----------
+
+  async ensureWaqiProviderAndEndpoint() {
+    // Upsert provider
+    await this.em.getConnection().execute(
+      `INSERT INTO ingest.source_providers (code, name, category, base_url, is_active, config)
+       VALUES ($1,$2,$3,$4,TRUE,$5::jsonb)
+       ON CONFLICT (code) DO NOTHING`,
+      [WAQI_PROVIDER_CODE, WAQI_PROVIDER_NAME, WAQI_PROVIDER_CATEGORY, WAQI_PROVIDER_BASE_URL,
+       JSON.stringify({ requires_token: true, rate_limit_rpm: 1000 })],
+    );
+
+    const provider = await this.em.findOne(
+      SourceProvider,
+      { code: WAQI_PROVIDER_CODE },
+    );
+    if (!provider) throw new Error("Failed to ensure WAQI provider");
+    const providerId = provider.id;
+
+    // Upsert endpoint
+    await this.em.getConnection().execute(
+      `INSERT INTO ingest.source_endpoints
+         (source_provider_id, code, name, base_url, path, http_method, parser_key, is_active, config)
+       VALUES ($1,$2,$3,$4,$5,'GET',$6,TRUE,'{}'::jsonb)
+       ON CONFLICT (code) DO UPDATE
+       SET name = EXCLUDED.name, base_url = EXCLUDED.base_url, parser_key = EXCLUDED.parser_key, is_active = TRUE`,
+      [providerId, WAQI_ENDPOINT_CODE, "WAQI Station Feed (realtime)",
+       WAQI_PROVIDER_BASE_URL, "/feed/geo:{lat};{lng}/", WAQI_PARSER_KEY],
+    );
+
+    const endpoint = await this.em.findOne(
+      SourceEndpoint,
+      { code: WAQI_ENDPOINT_CODE },
+    );
+    if (!endpoint) throw new Error("Failed to ensure WAQI endpoint");
+
+    return { providerId, endpointId: endpoint.id };
+  }
+
+  // ---------- WAQI ingest ----------
+
+  async runWaqi(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
+    const waqiToken = process.env.WAQI_TOKEN;
+    if (!waqiToken) {
+      this.logger.warn("WAQI_TOKEN not set — skipping WAQI ingest");
+      return { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: ["WAQI_TOKEN not configured"] };
+    }
+
+    const started = Date.now();
+    const errors: string[] = [];
+    let stations: StationRow[] = [];
+    let aqCount = 0;
+    let pipelineRunId = "";
+
+    try {
+      // Setup provider, endpoint, stations, and bindings in transaction
+      const setup = await this.em.transactional(async (em) => {
+        const { providerId, endpointId } = await this.ensureWaqiProviderAndEndpoint();
+        const stationsResult = await em.find(
+          Station,
+          { isActive: true },
+          { orderBy: { code: "ASC" } },
+        );
+        stations = stationsResult.map(s => ({
+          id: s.id,
+          code: s.code,
+          lat: s.lat,
+          lng: s.lng,
+          timezone: s.timezone,
+        }));
+
+        // Ensure bindings
+        for (const s of stations) {
+          await em.getConnection().execute(
+            `INSERT INTO ingest.station_source_bindings
+               (station_id, source_provider_id, source_endpoint_id, is_enabled, priority, valid_from, config)
+             VALUES ($1,$2,$3,TRUE,200,now(),'{}'::jsonb)
+             ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
+            [s.id, providerId, endpointId],
+          );
+        }
+
+        const runId = await this.createPipelineRun(providerId, endpointId, triggerType);
+        return { providerId, endpointId, runId };
+      });
+      if (!setup) throw new Error("Database not configured");
+      pipelineRunId = setup.runId;
+      const { providerId, endpointId, runId } = setup;
+
+      // WAQI rate-limit: 1 request per station, with small delay
+      for (let i = 0; i < stations.length; i++) {
+        const s = stations[i];
+        try {
+          const url = buildWaqiFeedUrl(s.lat, s.lng, waqiToken);
+          const safeUrl = url.replace(/token=[^&]+/, "token=***");
+          const res = await fetchWaqi(url);
+
+          const count = await this.em.transactional(async (em) => {
+            const outId = await this.recordOutbound(
+              runId, providerId, endpointId, safeUrl, res.status, res.latency_ms, res.ok,
+            );
+            if (!res.ok) throw new Error(`WAQI HTTP ${res.status}: ${res.payload?.data ?? "unknown"}`);
+            const rawId = await this.storeRawPayload(runId, outId, endpointId, s.id, res.payload);
+            const normId = await this.createNormalizeRun(runId, rawId);
+            const points = normalizeWaqiAq(res.payload);
+            const inserted = await this.insertAqObservations(
+              s, providerId, endpointId, runId, rawId, normId, points,
+            );
+            await this.finalizeNormalizeRun(normId, inserted);
+            return inserted;
+          });
+          aqCount += count ?? 0;
+
+          // Rate-limit delay
+          if (i < stations.length - 1) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        } catch (e: any) {
+          errors.push(`[${s.code}][waqi] ${e?.message ?? e}`);
+          this.logger.warn(`WAQI failed for ${s.code}: ${e?.message}`);
+        }
+      }
+
+      const status: "succeeded" | "partial" | "failed" =
+        errors.length === 0 ? "succeeded" : aqCount > 0 ? "partial" : "failed";
+      await this.em.transactional(async (em) => {
+        await this.finalizePipelineRun(pipelineRunId, status, {
+          stations: stations.length,
+          aq_points: aqCount,
+          weather_points: 0,
+          errors_count: errors.length,
+          duration_ms: Date.now() - started,
+        }, errors.length ? errors.slice(0, 5).join("; ") : undefined);
+      });
+
+      return { pipeline_run_id: pipelineRunId, stations: stations.length, aq_points: aqCount, weather_points: 0, errors };
+    } catch (e: any) {
+      this.logger.error(`WAQI ingest failed: ${e?.message}`);
+      if (pipelineRunId) {
+        await this.em.transactional(async (em) => {
+          await this.finalizePipelineRun(pipelineRunId, "failed", {}, String(e?.message ?? e));
+        });
+      }
+      throw e;
+    }
+  }
+
+  // ---------- Multi-provider orchestrator ----------
+
+  async runAll(triggerType: "scheduled" | "manual" = "manual"): Promise<MultiSyncResult> {
+    if (this.running) throw new Error("Ingest already running");
+    this.running = true;
+    try {
+      // 1) Open-Meteo
+      let omResult: SyncResult | null = null;
+      try {
+        omResult = await this.runOpenMeteo(triggerType);
+      } catch (e: any) {
+        this.logger.error(`Open-Meteo ingest error: ${e?.message}`);
+        omResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
+      }
+
+      // 2) WAQI
+      let waqiResult: SyncResult | null = null;
+      if (process.env.WAQI_TOKEN) {
+        try {
+          waqiResult = await this.runWaqi(triggerType);
+        } catch (e: any) {
+          this.logger.error(`WAQI ingest error: ${e?.message}`);
+          waqiResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
+        }
+      }
+
+      const totalAq = (omResult?.aq_points ?? 0) + (waqiResult?.aq_points ?? 0);
+      const totalWeather = omResult?.weather_points ?? 0;
+      const totalErrors = [...(omResult?.errors ?? []), ...(waqiResult?.errors ?? [])];
+
+      this.logger.log(
+        `Multi-provider ingest done: OpenMeteo=${omResult?.aq_points ?? 0}aq+${omResult?.weather_points ?? 0}w, WAQI=${waqiResult?.aq_points ?? 0}aq, errors=${totalErrors.length}`,
+      );
+
+      return { openmeteo: omResult, waqi: waqiResult, total_aq_points: totalAq, total_weather_points: totalWeather, total_errors: totalErrors };
+    } finally {
+      this.running = false;
+    }
+  }
+
+  // ---------- Open-Meteo ingest ----------
+
+  private async runOpenMeteo(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
+    const started = Date.now();
+    const errors: string[] = [];
+    let stations: StationRow[] = [];
+    let aqCount = 0;
+    let weatherCount = 0;
+    let pipelineRunId = "";
+
+    try {
+      const setup = await this.em.transactional(async (em) => {
+        const { providerId, aqEndpointId, weatherEndpointId } =
+          await this.ensureProviderAndEndpoints();
+        const stationsResult = await em.find(
+          Station,
+          { isActive: true },
+          { orderBy: { code: "ASC" } },
+        );
+        stations = stationsResult.map(s => ({
+          id: s.id,
+          code: s.code,
+          lat: s.lat,
+          lng: s.lng,
+          timezone: s.timezone,
+        }));
+        await this.ensureBindings(stations, providerId, aqEndpointId, weatherEndpointId);
+        const runId = await this.createPipelineRun(providerId, aqEndpointId, triggerType);
+        return { providerId, aqEndpointId, weatherEndpointId, runId };
+      });
+      if (!setup) throw new Error("Database not configured");
+      pipelineRunId = setup.runId;
+      const { providerId, aqEndpointId, weatherEndpointId, runId } = setup;
+
+      for (const s of stations) {
+        const tz = s.timezone ?? "UTC";
+
+        // Air quality
+        try {
+          const aqUrl = buildAqUrl({
+            lat: s.lat,
+            lng: s.lng,
+            timezone: tz,
+            past_hours: pastHours(),
+            fields: DEFAULT_AQ_FIELDS,
+          });
+          const resAq = await fetchOpenMeteo(aqUrl);
+          const count = await this.em.transactional(async (em) => {
+            const outId = await this.recordOutbound(
+              runId, providerId, aqEndpointId, aqUrl, resAq.status, resAq.latency_ms, resAq.ok,
+            );
+            if (!resAq.ok) throw new Error(`AQ HTTP ${resAq.status}`);
+            const rawId = await this.storeRawPayload(runId, outId, aqEndpointId, s.id, resAq.payload);
+            const normId = await this.createNormalizeRun(runId, rawId);
+            const points = normalizeAq(resAq.payload);
+            const inserted = await this.insertAqObservations(
+              s, providerId, aqEndpointId, runId, rawId, normId, points,
+            );
+            await this.finalizeNormalizeRun(normId, inserted);
+            return inserted;
+          });
+          aqCount += count ?? 0;
+        } catch (e: any) {
+          errors.push(`[${s.code}][aq] ${e?.message ?? e}`);
+          this.logger.warn(`AQ failed for ${s.code}: ${e?.message}`);
+        }
+
+        // Weather
+        try {
+          const wUrl = buildWeatherUrl({
+            lat: s.lat,
+            lng: s.lng,
+            timezone: tz,
+            past_hours: pastHours(),
+            fields: DEFAULT_WEATHER_FIELDS,
+          });
+          const resW = await fetchOpenMeteo(wUrl);
+          const count = await this.em.transactional(async (em) => {
+            const outId = await this.recordOutbound(
+              runId, providerId, weatherEndpointId, wUrl, resW.status, resW.latency_ms, resW.ok,
+            );
+            if (!resW.ok) throw new Error(`Weather HTTP ${resW.status}`);
+            const rawId = await this.storeRawPayload(runId, outId, weatherEndpointId, s.id, resW.payload);
+            const normId = await this.createNormalizeRun(runId, rawId);
+            const points = normalizeWeather(resW.payload);
+            const inserted = await this.insertWeatherObservations(
+              s, providerId, weatherEndpointId, runId, rawId, normId, points,
+            );
+            await this.finalizeNormalizeRun(normId, inserted);
+            return inserted;
+          });
+          weatherCount += count ?? 0;
+        } catch (e: any) {
+          errors.push(`[${s.code}][weather] ${e?.message ?? e}`);
+          this.logger.warn(`Weather failed for ${s.code}: ${e?.message}`);
+        }
+      }
+
+      const status: "succeeded" | "partial" | "failed" =
+        errors.length === 0 ? "succeeded" : aqCount + weatherCount > 0 ? "partial" : "failed";
+      await this.em.transactional(async (em) => {
+        await this.finalizePipelineRun(
+          pipelineRunId,
+          status,
+          {
+            stations: stations.length,
+            aq_points: aqCount,
+            weather_points: weatherCount,
+            errors_count: errors.length,
+            duration_ms: Date.now() - started,
+          },
+          errors.length ? errors.slice(0, 5).join("; ") : undefined,
+        );
+      });
+
+      return {
+        pipeline_run_id: pipelineRunId,
+        stations: stations.length,
+        aq_points: aqCount,
+        weather_points: weatherCount,
+        errors,
+      };
+    } catch (e: any) {
+      this.logger.error(`OpenMeteo ingest failed: ${e?.message}`);
+      if (pipelineRunId) {
+        await this.em.transactional(async (em) => {
+          await this.finalizePipelineRun(pipelineRunId, "failed", {}, String(e?.message ?? e));
+        });
+      }
+      throw e;
+    }
+  }
+
+  /**
+   * Backward-compatible run() — delegates to runAll() for multi-provider.
+   */
+  async run(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
+    const multi = await this.runAll(triggerType);
+    return {
+      pipeline_run_id: multi.openmeteo?.pipeline_run_id ?? "",
+      stations: multi.openmeteo?.stations ?? 0,
+      aq_points: multi.total_aq_points,
+      weather_points: multi.total_weather_points,
+      errors: multi.total_errors,
+    };
+  }
+}

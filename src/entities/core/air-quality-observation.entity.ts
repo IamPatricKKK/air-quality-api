@@ -1,0 +1,103 @@
+import { Entity, PrimaryKey, Property, ManyToOne, Unique } from '@mikro-orm/core';
+
+@Entity({ tableName: 'core.air_quality_observations' })
+@Unique({ properties: ['stationId', 'observedAt', 'sourceEndpointId'] })
+export class AirQualityObservation {
+  @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
+  id!: string;
+
+  @ManyToOne({ entity: () => 'Station', fieldName: 'station_id', onDelete: 'CASCADE', ref: true })
+  stationId!: string;
+
+  @ManyToOne({
+    entity: () => 'SourceProvider',
+    fieldName: 'source_provider_id',
+    onDelete: 'RESTRICT',
+    ref: true,
+  })
+  sourceProviderId!: string;
+
+  @ManyToOne({
+    entity: () => 'SourceEndpoint',
+    fieldName: 'source_endpoint_id',
+    onDelete: 'RESTRICT',
+    ref: true,
+  })
+  sourceEndpointId!: string;
+
+  @ManyToOne({
+    entity: () => 'PipelineRun',
+    fieldName: 'pipeline_run_id',
+    onDelete: 'RESTRICT',
+    ref: true,
+  })
+  pipelineRunId!: string;
+
+  @ManyToOne({
+    entity: () => 'RawPayload',
+    fieldName: 'raw_payload_id',
+    onDelete: 'SET NULL',
+    nullable: true,
+    ref: true,
+  })
+  rawPayloadId?: string;
+
+  @ManyToOne({
+    entity: () => 'NormalizeRun',
+    fieldName: 'normalize_run_id',
+    onDelete: 'SET NULL',
+    nullable: true,
+    ref: true,
+  })
+  normalizeRunId?: string;
+
+  @Property({ nullable: true })
+  externalRecordId?: string;
+
+  @Property({ type: 'datetime' })
+  observedAt!: Date;
+
+  @Property({ type: 'datetime', defaultRaw: 'now()' })
+  fetchedAt!: Date;
+
+  @Property({ type: 'integer' })
+  aqi!: number;
+  // CHECK aqi >= 0
+
+  @Property({ type: 'double precision', nullable: true, columnType: 'double precision' })
+  pm25?: number;
+
+  @Property({ type: 'double precision', nullable: true, columnType: 'double precision' })
+  pm10?: number;
+
+  @Property({ type: 'double precision', nullable: true, columnType: 'double precision' })
+  o3?: number;
+
+  @Property({ type: 'double precision', nullable: true, columnType: 'double precision' })
+  no2?: number;
+
+  @Property({ type: 'double precision', nullable: true, columnType: 'double precision' })
+  so2?: number;
+
+  @Property({ type: 'double precision', nullable: true, columnType: 'double precision' })
+  co?: number;
+
+  @Property({ type: 'double precision', nullable: true, columnType: 'double precision' })
+  temperatureC?: number;
+
+  @Property({ type: 'double precision', nullable: true, columnType: 'double precision' })
+  humidityPct?: number;
+
+  @Property({ type: 'double precision', nullable: true, columnType: 'double precision' })
+  windSpeedMps?: number;
+
+  @Property({ default: 'valid' })
+  qualityStatus!: string;
+  // quality_status_enum: 'valid', 'questionable', 'suspect', 'corrected'
+
+  @Property({ type: 'jsonb', default: '{}' })
+  lineage!: Record<string, any>;
+
+  @Property({ type: 'datetime', defaultRaw: 'now()' })
+  createdAt!: Date;
+}
