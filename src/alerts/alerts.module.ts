@@ -1,5 +1,7 @@
 import { Module } from "@nestjs/common";
 import { MikroOrmModule } from "@mikro-orm/nestjs";
+import { PushModule } from "../push/push.module";
+import { RealtimeModule } from "../realtime/realtime.module";
 import { AlertRulesController } from "./alert-rules.controller";
 import { AlertsController } from "./alerts.controller";
 import { AlertRulesService } from "./alert-rules.service";
@@ -18,6 +20,8 @@ import {
 
 @Module({
   imports: [
+    PushModule,
+    RealtimeModule,
     MikroOrmModule.forFeature([
       UserAlertRule,
       Notification,

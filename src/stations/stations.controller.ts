@@ -1,4 +1,5 @@
-import { Controller, Get, NotFoundException, Param, Query } from "@nestjs/common";
+import { Controller, Get, NotFoundException, Param, Query, Res } from "@nestjs/common";
+import type { Response } from "express";
 import { EntityManager } from "@mikro-orm/postgresql";
 import { Station, Area, AirQualityObservation } from "../entities";
 
@@ -105,6 +106,61 @@ export class StationsController {
       [id, limitHours],
     );
     return rows ?? [];
+  }
+
+  @Get(":id/history.csv")
+  async exportHistoryCsv(
+    @Param("id") id: string,
+    @Query("hours") hours: string | undefined,
+    @Res() res: Response,
+  ) {
+    const limitHours = Math.min(Math.max(Number(hours ?? 24), 1), 24 * 30);
+    const stationRows = await this.em.getConnection().execute<{ code: string; name: string }>(
+      `SELECT code, name FROM catalog.stations WHERE id = $1 LIMIT 1`,
+      [id],
+    );
+    const station = stationRows?.[0];
+    if (!station) throw new NotFoundException(`Station ${id} not found`);
+
+    const rows = await this.em.getConnection().execute<{
+      observed_at: string;
+      aqi: number;
+      pm25: number | null;
+      pm10: number | null;
+      o3: number | null;
+      no2: number | null;
+      so2: number | null;
+      co: number | null;
+    }>(
+      `SELECT observed_at, aqi, pm25, pm10, o3, no2, so2, co
+       FROM core.air_quality_observations
+       WHERE station_id = $1
+         AND observed_at >= now() - ($2::text || ' hours')::interval
+       ORDER BY observed_at ASC`,
+      [id, limitHours],
+    );
+
+    const header = "observed_at,aqi,pm25,pm10,o3,no2,so2,co\n";
+    const list = Array.isArray(rows) ? rows : rows ? [rows] : [];
+    const body = list
+      .map((r) =>
+        [
+          r.observed_at,
+          r.aqi ?? "",
+          r.pm25 ?? "",
+          r.pm10 ?? "",
+          r.o3 ?? "",
+          r.no2 ?? "",
+          r.so2 ?? "",
+          r.co ?? "",
+        ].join(","),
+      )
+      .join("\n");
+
+    const filename = `airwatch-${station.code}-${limitHours}h.csv`;
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send("﻿" + header + body);
   }
 
   @Get(":id/analytics")

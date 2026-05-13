@@ -24,6 +24,15 @@ export class UserPreference {
   @Property({ type: 'boolean', default: true })
   dailyReportEnabled: boolean = true;
 
+  @Property({ type: 'boolean', default: false })
+  quietHoursEnabled: boolean = false;
+
+  @Property({ type: 'smallint', default: 1320 })
+  quietHoursStartMin: number = 1320;
+
+  @Property({ type: 'smallint', default: 420 })
+  quietHoursEndMin: number = 420;
+
   @Property({ type: 'double', nullable: true })
   locationLat?: number;
 

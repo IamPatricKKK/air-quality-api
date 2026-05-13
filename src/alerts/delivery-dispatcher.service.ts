@@ -1,6 +1,8 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { EntityManager } from "@mikro-orm/postgresql";
 import { EmailService } from "./email.service";
+import { PushService } from "../push/push.service";
+import { RealtimeGateway } from "../realtime/realtime.gateway";
 import { Notification, User } from "../entities";
 
 interface AlertForDispatch {
@@ -22,10 +24,21 @@ export class DeliveryDispatcher {
 
   constructor(
     private readonly emailService: EmailService,
+    private readonly pushService: PushService,
+    private readonly realtime: RealtimeGateway,
     private readonly em: EntityManager,
   ) {}
 
   async dispatch(alert: AlertForDispatch): Promise<void> {
+    this.realtime.broadcastAlert({
+      user_id: alert.user_id,
+      alert_id: alert.id,
+      station_id: alert.station_id,
+      title: alert.title,
+      message: alert.message,
+      category: alert.aqi_category,
+    });
+
     for (const channel of alert.channels) {
       const deliveryId = await this.createDelivery(alert.id, channel);
       if (!deliveryId) continue;
@@ -38,6 +51,9 @@ export class DeliveryDispatcher {
           case "email":
             await this.deliverEmail(alert);
             break;
+          case "push":
+            await this.deliverPush(alert);
+            break;
           default:
             this.logger.warn(`Unknown channel: ${channel}`);
         }
@@ -46,6 +62,21 @@ export class DeliveryDispatcher {
         this.logger.error(`Delivery ${deliveryId} failed (${channel}): ${err}`);
         await this.markDelivery(deliveryId, "failed", String(err));
       }
+    }
+  }
+
+  private async deliverPush(alert: AlertForDispatch): Promise<void> {
+    const sent = await this.pushService.sendToUser(alert.user_id, {
+      title: alert.title,
+      body: alert.message,
+      tag: `alert-${alert.station_id ?? "global"}`,
+      stationId: alert.station_id ?? undefined,
+      aqi: alert.metric === "aqi" ? alert.actual_value : undefined,
+      category: alert.aqi_category ?? undefined,
+      url: alert.station_id ? `/stations/${alert.station_id}` : "/",
+    });
+    if (sent === 0) {
+      this.logger.warn(`No push subscriptions for user ${alert.user_id}`);
     }
   }
 

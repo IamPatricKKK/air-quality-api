@@ -1,5 +1,6 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { EntityManager } from "@mikro-orm/postgresql";
+import { RealtimeGateway } from "../realtime/realtime.gateway";
 import {
   AQ_BASE_URL,
   AQ_ENDPOINT_CODE,
@@ -114,7 +115,10 @@ export class IngestService {
   private readonly logger = new Logger(IngestService.name);
   private running = false;
 
-  constructor(private readonly em: EntityManager) {}
+  constructor(
+    private readonly em: EntityManager,
+    private readonly realtime: RealtimeGateway,
+  ) {}
 
   isRunning() {
     return this.running;
@@ -381,6 +385,20 @@ export class IngestService {
         ],
       );
       if (result.rowCount) inserted++;
+    }
+    if (inserted > 0 && points.length > 0) {
+      const latest = points[points.length - 1];
+      this.realtime.broadcastObservations([
+        {
+          station_id: station.id,
+          station_code: station.code,
+          aqi: latest.aqi ?? null,
+          pm25: latest.pm25 ?? null,
+          pm10: latest.pm10 ?? null,
+          observed_at: latest.observed_at,
+          provider: endpointId,
+        },
+      ]);
     }
     return inserted;
   }

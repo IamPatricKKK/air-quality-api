@@ -1,8 +1,10 @@
 import { randomUUID } from "crypto";
-import { Body, Controller, Get, Headers, Post, Query, UnauthorizedException, Inject } from "@nestjs/common";
+import { BadRequestException, Body, Controller, Get, Headers, Post, Query, UnauthorizedException, Inject } from "@nestjs/common";
+import { Throttle, SkipThrottle } from "@nestjs/throttler";
 import { EntityManager } from "@mikro-orm/core";
 import { hasDatabase } from "../db/database";
 import { issueAccessToken, mapClaimsToUser, requireAuth, resolveActingUserId } from "./jwt";
+import { PasswordResetService } from "./password-reset.service";
 import { User } from "../entities/iam/user.entity";
 import { UserProfile } from "../entities/iam/user-profile.entity";
 import { Role } from "../entities/iam/role.entity";
@@ -77,9 +79,40 @@ async function loadUserByEmail(em: EntityManager, email: string, password: strin
 
 @Controller("auth")
 export class AuthController {
-  constructor(@Inject(EntityManager) private readonly em: EntityManager) {}
+  constructor(
+    @Inject(EntityManager) private readonly em: EntityManager,
+    private readonly passwordReset: PasswordResetService,
+  ) {}
+
+  @Post("forgot-password")
+  @Throttle({ long: { limit: 3, ttl: 60 * 60_000 } })
+  async forgotPassword(@Body() body: { email?: string }) {
+    if (!body?.email) {
+      throw new BadRequestException("Email is required");
+    }
+    // Always return success to avoid leaking which emails exist
+    await this.passwordReset.requestReset(body.email);
+    return { success: true, message: "Nếu email tồn tại, link đặt lại mật khẩu đã được gửi." };
+  }
+
+  @Post("reset-password")
+  @Throttle({ medium: { limit: 5, ttl: 60_000 } })
+  async resetPassword(@Body() body: { token?: string; password?: string }) {
+    if (!body?.token || !body?.password) {
+      throw new BadRequestException("Token và mật khẩu là bắt buộc");
+    }
+    if (body.password.length < 6) {
+      throw new BadRequestException("Mật khẩu phải có ít nhất 6 ký tự");
+    }
+    const ok = await this.passwordReset.resetPassword(body.token, body.password);
+    if (!ok) {
+      throw new BadRequestException("Token không hợp lệ hoặc đã hết hạn");
+    }
+    return { success: true };
+  }
 
   @Post("login")
+  @Throttle({ medium: { limit: 5, ttl: 60_000 } })
   async login(@Body() body: { email: string; password?: string }) {
     if (hasDatabase()) {
       if (!body.password) {
@@ -112,6 +145,7 @@ export class AuthController {
   }
 
   @Post("register")
+  @Throttle({ long: { limit: 3, ttl: 60 * 60_000 } })
   async register(@Body() body: { email: string; password?: string; displayName?: string }) {
     const password = body.password ?? "air-quality-password";
     const roleCode = body.email.includes("admin")
@@ -210,6 +244,7 @@ export class AuthController {
   }
 
   @Get("me")
+  @SkipThrottle()
   async me(@Headers("authorization") authHeader?: string, @Query("userId") userId?: string) {
     if (authHeader) {
       const claims = requireAuth(authHeader);
@@ -259,6 +294,7 @@ export class AuthController {
   }
 
   @Post("logout")
+  @SkipThrottle()
   logout() {
     return { ok: true };
   }

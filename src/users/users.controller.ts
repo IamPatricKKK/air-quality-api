@@ -10,6 +10,9 @@ interface PreferencesRow {
   push_enabled: boolean;
   email_enabled: boolean;
   daily_report_enabled: boolean;
+  quiet_hours_enabled: boolean | null;
+  quiet_hours_start_min: number | null;
+  quiet_hours_end_min: number | null;
   location_lat: number | null;
   location_lng: number | null;
   pinned_station_ids: string[] | null;
@@ -22,6 +25,9 @@ interface PreferencesPayload {
   pushEnabled?: boolean;
   emailEnabled?: boolean;
   dailyReportEnabled?: boolean;
+  quietHoursEnabled?: boolean;
+  quietHoursStartMin?: number;
+  quietHoursEndMin?: number;
   pinnedStationIds?: string[];
   location?: {
     lat: number;
@@ -35,6 +41,9 @@ const DEFAULT_PREFERENCES = {
   pushEnabled: true,
   emailEnabled: true,
   dailyReportEnabled: true,
+  quietHoursEnabled: false,
+  quietHoursStartMin: 1320,
+  quietHoursEndMin: 420,
   pinnedStationIds: [] as string[],
   location: undefined as { lat: number; lng: number } | undefined,
 };
@@ -46,6 +55,9 @@ function mapPreferences(row: PreferencesRow) {
     pushEnabled: row.push_enabled,
     emailEnabled: row.email_enabled,
     dailyReportEnabled: row.daily_report_enabled,
+    quietHoursEnabled: row.quiet_hours_enabled ?? false,
+    quietHoursStartMin: row.quiet_hours_start_min ?? 1320,
+    quietHoursEndMin: row.quiet_hours_end_min ?? 420,
     pinnedStationIds: row.pinned_station_ids ?? [],
     location:
       row.location_lat != null && row.location_lng != null
@@ -71,13 +83,16 @@ export class UsersController {
           up.push_enabled,
           up.email_enabled,
           up.daily_report_enabled,
+          up.quiet_hours_enabled,
+          up.quiet_hours_start_min,
+          up.quiet_hours_end_min,
           up.location_lat,
           up.location_lng,
           ARRAY_REMOVE(ARRAY_AGG(ups.station_id::text ORDER BY ups.sort_order), NULL) AS pinned_station_ids
         FROM app.user_preferences up
         LEFT JOIN app.user_pinned_stations ups ON ups.user_id = up.user_id
         WHERE ($1::uuid IS NULL OR up.user_id = $1::uuid)
-        GROUP BY up.user_id, up.notification_mode, up.favorite_regions, up.push_enabled, up.email_enabled, up.daily_report_enabled, up.location_lat, up.location_lng, up.created_at
+        GROUP BY up.user_id, up.notification_mode, up.favorite_regions, up.push_enabled, up.email_enabled, up.daily_report_enabled, up.quiet_hours_enabled, up.quiet_hours_start_min, up.quiet_hours_end_min, up.location_lat, up.location_lng, up.created_at
         ORDER BY up.created_at ASC
         LIMIT 1
       `,
@@ -123,7 +138,7 @@ export class UsersController {
           FROM app.user_preferences up
           LEFT JOIN app.user_pinned_stations ups ON ups.user_id = up.user_id
           WHERE up.user_id = $1::uuid
-          GROUP BY up.user_id, up.notification_mode, up.favorite_regions, up.push_enabled, up.email_enabled, up.daily_report_enabled, up.location_lat, up.location_lng, up.created_at
+          GROUP BY up.user_id, up.notification_mode, up.favorite_regions, up.push_enabled, up.email_enabled, up.daily_report_enabled, up.quiet_hours_enabled, up.quiet_hours_start_min, up.quiet_hours_end_min, up.location_lat, up.location_lng, up.created_at
           LIMIT 1
         `,
         [userId],
@@ -145,6 +160,9 @@ export class UsersController {
         pushEnabled: payload.pushEnabled ?? currentRow?.push_enabled ?? DEFAULT_PREFERENCES.pushEnabled,
         emailEnabled: payload.emailEnabled ?? currentRow?.email_enabled ?? DEFAULT_PREFERENCES.emailEnabled,
         dailyReportEnabled: payload.dailyReportEnabled ?? currentRow?.daily_report_enabled ?? true,
+        quietHoursEnabled: payload.quietHoursEnabled ?? currentRow?.quiet_hours_enabled ?? DEFAULT_PREFERENCES.quietHoursEnabled,
+        quietHoursStartMin: payload.quietHoursStartMin ?? currentRow?.quiet_hours_start_min ?? DEFAULT_PREFERENCES.quietHoursStartMin,
+        quietHoursEndMin: payload.quietHoursEndMin ?? currentRow?.quiet_hours_end_min ?? DEFAULT_PREFERENCES.quietHoursEndMin,
         pinnedStationIds: payload.pinnedStationIds ?? currentRow?.pinned_station_ids ?? DEFAULT_PREFERENCES.pinnedStationIds,
         location: resolvedLocation,
       };
@@ -159,6 +177,9 @@ export class UsersController {
           pushEnabled: resolved.pushEnabled,
           emailEnabled: resolved.emailEnabled,
           dailyReportEnabled: resolved.dailyReportEnabled,
+          quietHoursEnabled: resolved.quietHoursEnabled,
+          quietHoursStartMin: resolved.quietHoursStartMin,
+          quietHoursEndMin: resolved.quietHoursEndMin,
           locationLat: resolved.location?.lat ?? null,
           locationLng: resolved.location?.lng ?? null,
         });
@@ -170,6 +191,9 @@ export class UsersController {
           pushEnabled: resolved.pushEnabled,
           emailEnabled: resolved.emailEnabled,
           dailyReportEnabled: resolved.dailyReportEnabled,
+          quietHoursEnabled: resolved.quietHoursEnabled,
+          quietHoursStartMin: resolved.quietHoursStartMin,
+          quietHoursEndMin: resolved.quietHoursEndMin,
           locationLat: resolved.location?.lat ?? null,
           locationLng: resolved.location?.lng ?? null,
         });
