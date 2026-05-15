@@ -113,15 +113,16 @@ function pastHours(): number {
 @Injectable()
 export class IngestService {
   private readonly logger = new Logger(IngestService.name);
-  private running = false;
+  private readonly runningProviders = new Set<string>();
 
   constructor(
     private readonly em: EntityManager,
     private readonly realtime: RealtimeGateway,
   ) {}
 
-  isRunning() {
-    return this.running;
+  isRunning(provider?: string) {
+    if (provider) return this.runningProviders.has(provider);
+    return this.runningProviders.size > 0;
   }
 
   async ensureProviderAndEndpoints() {
@@ -952,13 +953,10 @@ export class IngestService {
   // ---------- Multi-provider orchestrator ----------
 
   async runAll(triggerType: "scheduled" | "manual" = "manual"): Promise<MultiSyncResult> {
-    if (this.running) throw new Error("Ingest already running");
-    this.running = true;
-    try {
-      // Priority order: IQAir (primary) → OpenWeather (secondary) → Open-Meteo → WAQI
+    // Priority order: IQAir (primary) → OpenWeather (secondary) → Open-Meteo → WAQI
 
-      // 1) IQAir (primary)
-      let iqairResult: SyncResult | null = null;
+    // 1) IQAir (primary)
+    let iqairResult: SyncResult | null = null;
       if (process.env.IQAIR_API_KEY) {
         try {
           iqairResult = await this.runIqair(triggerType);
@@ -1032,14 +1030,11 @@ export class IngestService {
         total_weather_points: totalWeather,
         total_errors: totalErrors,
       };
-    } finally {
-      this.running = false;
-    }
   }
 
   // ---------- Open-Meteo ingest ----------
 
-  private async runOpenMeteo(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
+  async runOpenMeteo(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
     const started = Date.now();
     const errors: string[] = [];
     let stations: StationRow[] = [];
