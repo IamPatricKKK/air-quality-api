@@ -16,8 +16,7 @@ export default defineConfig({
     path: './dist/migrations',
     pathTs: './src/migrations',
     // Migration tracking table in ops schema
-    tableName: 'mikro_orm_migrations',
-    schemaName: 'ops',
+    tableName: 'ops.mikro_orm_migrations',
     transactional: true,
     allOrNothing: true,
     glob: '!(*.d).{js,ts}',
@@ -30,8 +29,8 @@ export default defineConfig({
     createForeignKeyConstraints: true,
   },
 
-  // Debug in dev
-  debug: process.env.NODE_ENV !== 'production',
+  // Debug queries only when explicitly enabled
+  debug: process.env.MIKRO_ORM_DEBUG === 'true',
 
   // Connection pool
   pool: { min: 2, max: 10 },
