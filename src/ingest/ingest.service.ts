@@ -129,9 +129,9 @@ export class IngestService {
     // Upsert provider using raw SQL (ON CONFLICT support)
     await this.em.getConnection().execute(
       `INSERT INTO ingest.source_providers (code, name, category, base_url, is_active, config)
-       VALUES ($1,$2,$3,$4,TRUE,'{}'::jsonb)
+       VALUES (?,?,?,?,TRUE,?::jsonb)
        ON CONFLICT (code) DO NOTHING`,
-      [OPENMETEO_PROVIDER_CODE, OPENMETEO_PROVIDER_NAME, OPENMETEO_PROVIDER_CATEGORY, OPENMETEO_PROVIDER_BASE_URL],
+      [OPENMETEO_PROVIDER_CODE, OPENMETEO_PROVIDER_NAME, OPENMETEO_PROVIDER_CATEGORY, OPENMETEO_PROVIDER_BASE_URL, '{}'],
     );
 
     const provider = await this.em.findOne(
@@ -147,18 +147,18 @@ export class IngestService {
       baseUrl: string,
       path: string,
       parserKey: string,
+      kind: string = 'air_quality',
     ) => {
       await this.em.getConnection().execute(
         `INSERT INTO ingest.source_endpoints
-          (source_provider_id, code, name, base_url, path, http_method, parser_key, is_active, config)
-        VALUES ($1,$2,$3,$4,$5,'GET',$6,TRUE,'{}'::jsonb)
+          (provider_id, code, name, kind, http_method, path, parser_key, is_active, config)
+        VALUES (?,?,?,?,'GET',?,?,TRUE,'{}'::jsonb)
         ON CONFLICT (code) DO UPDATE
         SET name = EXCLUDED.name,
-            base_url = EXCLUDED.base_url,
             path = EXCLUDED.path,
             parser_key = EXCLUDED.parser_key,
             is_active = TRUE`,
-        [providerId, code, name, baseUrl, path, parserKey],
+        [providerId, code, name, kind, path, parserKey],
       );
     };
 
@@ -168,6 +168,7 @@ export class IngestService {
       AQ_BASE_URL,
       AQ_PATH,
       AQ_PARSER_KEY,
+      'air_quality',
     );
     await upsertEndpoint(
       WEATHER_ENDPOINT_CODE,
@@ -175,6 +176,7 @@ export class IngestService {
       WEATHER_BASE_URL,
       WEATHER_PATH,
       WEATHER_PARSER_KEY,
+      'weather',
     );
 
     const endpoints = await this.em.find(
@@ -197,10 +199,10 @@ export class IngestService {
       for (const endpointId of [aqEndpointId, weatherEndpointId]) {
         await this.em.getConnection().execute(
           `INSERT INTO ingest.station_source_bindings
-            (station_id, source_provider_id, source_endpoint_id, is_enabled, priority, valid_from, config)
-          VALUES ($1,$2,$3,TRUE,100,now(),'{}'::jsonb)
-          ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
-          [s.id, providerId, endpointId],
+            (station_id, endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
+          VALUES (?,?,'',TRUE,100,now(),'{}'::jsonb)
+          ON CONFLICT (station_id, endpoint_id) DO NOTHING`,
+          [s.id, endpointId],
         );
       }
     }
@@ -226,13 +228,13 @@ export class IngestService {
     await this.em.getConnection().execute(
       `INSERT INTO ingest.pipeline_definitions
          (code, name, pipeline_type, owner_service, is_active, config)
-       VALUES ($1, $2, 'ingest', 'api', TRUE, '{}'::jsonb)
+       VALUES (?, ?, 'ingest', 'be_api', TRUE, '{}'::jsonb)
        ON CONFLICT (code) DO NOTHING`,
       [code, name],
     );
 
     const result: any = await this.em.getConnection().execute(
-      `SELECT id::text FROM ingest.pipeline_definitions WHERE code=$1`,
+      `SELECT id::text FROM ingest.pipeline_definitions WHERE code=?`,
       [code],
     );
     const defId: string | undefined = Array.isArray(result) ? result[0]?.id : result?.rows?.[0]?.id;
@@ -248,30 +250,30 @@ export class IngestService {
     providerCode = "unknown",
   ): Promise<string> {
     const definitionId = await this.ensureDefaultPipelineDefinition(providerId, providerCode);
-    const result = await this.em.getConnection().execute(
+    const result: any = await this.em.getConnection().execute(
       `INSERT INTO ingest.pipeline_runs
          (pipeline_definition_id, source_endpoint_id, trigger_type, status, started_at, metrics)
-       VALUES ($1, $2, $3, 'running', now(), '{}'::jsonb)
+       VALUES (?, ?, ?, 'running', now(), '{}'::jsonb)
        RETURNING id`,
       [definitionId, endpointId, triggerType],
     );
-    return result.rows[0].id;
+    const row = result.rows ? result.rows[0] : result[0]; return row.id;
   }
 
   private async finalizePipelineRun(
     runId: string,
-    status: "succeeded" | "failed" | "partial",
+    status: "success" | "failed" | "partial",
     stats: Record<string, unknown>,
     errorMessage?: string,
   ) {
     await this.em.getConnection().execute(
       `UPDATE ingest.pipeline_runs
-         SET status = $2,
+         SET status = ?,
              finished_at = now(),
-             metrics = $3::jsonb,
-             error_summary = $4
-       WHERE id = $1`,
-      [runId, status, JSON.stringify(stats), errorMessage ?? null],
+             metrics = ?::jsonb,
+             error_summary = ?
+       WHERE id = ?`,
+      [status, JSON.stringify(stats), errorMessage ?? null, runId],
     );
   }
 
@@ -285,16 +287,16 @@ export class IngestService {
     ok: boolean,
   ): Promise<string> {
     const statusEnum = ok ? "success" : "failed";
-    const result = await this.em.getConnection().execute(
+    const result: any = await this.em.getConnection().execute(
       `INSERT INTO ingest.outbound_requests
          (pipeline_run_id, source_provider_id, source_endpoint_id,
           request_url, request_method, request_params,
           http_status, status, latency_ms, request_started_at, response_received_at)
-       VALUES ($1, $2, $3, $4, 'GET', '{}'::jsonb, $5, $6::public.request_status_enum, $7, now(), now())
+       VALUES (?, ?, ?, ?, 'GET', '{}'::jsonb, ?, ?::public.request_status_enum, ?, now(), now())
        RETURNING id`,
       [pipelineRunId, providerId, endpointId, url, statusCode, statusEnum, latencyMs],
     );
-    return result.rows[0].id;
+    const row = result.rows ? result.rows[0] : result[0]; return row.id;
   }
 
   private async storeRawPayload(
@@ -308,38 +310,38 @@ export class IngestService {
     const body = JSON.stringify(payload);
     const hash = sha256Hex(`${endpointId}:${stationId}:${body}`);
 
-    const result = await this.em.getConnection().execute(
+    const result: any = await this.em.getConnection().execute(
       `INSERT INTO ingest.raw_payloads
          (pipeline_run_id, outbound_request_id, source_provider_id, source_endpoint_id, station_id,
           payload_format, payload_json, payload_hash, fetched_at)
-       VALUES ($1, $2, $3, $4, $5, 'json', $6::jsonb, $7, now())
+       VALUES (?, ?, ?, ?, ?, 'json', ?::jsonb, ?, now())
        ON CONFLICT (source_provider_id, payload_hash) DO UPDATE SET fetched_at = EXCLUDED.fetched_at
        RETURNING id`,
       [pipelineRunId, outboundId, providerId, endpointId, stationId, body, hash],
     );
-    return result.rows[0].id;
+    const row = result.rows ? result.rows[0] : result[0]; return row.id;
   }
 
   private async createNormalizeRun(
     pipelineRunId: string,
     rawPayloadId: string,
   ): Promise<string> {
-    const result = await this.em.getConnection().execute(
+    const result: any = await this.em.getConnection().execute(
       `INSERT INTO ingest.normalize_runs
          (pipeline_run_id, raw_payload_id, status, records_in, records_out)
-       VALUES ($1, $2, 'running', 0, 0)
+       VALUES (?, ?, 'running', 0, 0)
        RETURNING id`,
       [pipelineRunId, rawPayloadId],
     );
-    return result.rows[0].id;
+    const row = result.rows ? result.rows[0] : result[0]; return row.id;
   }
 
   private async finalizeNormalizeRun(id: string, inserted: number) {
     await this.em.getConnection().execute(
       `UPDATE ingest.normalize_runs
-         SET status = 'succeeded', records_out = $2
-       WHERE id = $1`,
-      [id, inserted],
+         SET status = 'success', records_out = ?
+       WHERE id = ?`,
+      [inserted, id],
     );
   }
 
@@ -355,12 +357,11 @@ export class IngestService {
     let inserted = 0;
     for (const p of points) {
       // Use raw SQL for complex ON CONFLICT with many field updates
-      const result = await this.em.getConnection().execute(
+      const result: any = await this.em.getConnection().execute(
         `INSERT INTO core.air_quality_observations
           (station_id, source_provider_id, source_endpoint_id, pipeline_run_id, raw_payload_id, normalize_run_id,
-           observed_at, aqi, pm25, pm10, o3, no2, so2, co,
-           european_aqi, ammonia, dust, aerosol_optical_depth, uv_index, lineage)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'{}'::jsonb)
+           observed_at, aqi, pm25, pm10, o3, no2, so2, co, lineage)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'{}'::jsonb)
         ON CONFLICT (station_id, observed_at, source_endpoint_id) DO UPDATE SET
           aqi = EXCLUDED.aqi,
           pm25 = EXCLUDED.pm25,
@@ -369,11 +370,6 @@ export class IngestService {
           no2 = EXCLUDED.no2,
           so2 = EXCLUDED.so2,
           co = EXCLUDED.co,
-          european_aqi = EXCLUDED.european_aqi,
-          ammonia = EXCLUDED.ammonia,
-          dust = EXCLUDED.dust,
-          aerosol_optical_depth = EXCLUDED.aerosol_optical_depth,
-          uv_index = EXCLUDED.uv_index,
           raw_payload_id = EXCLUDED.raw_payload_id,
           normalize_run_id = EXCLUDED.normalize_run_id,
           pipeline_run_id = EXCLUDED.pipeline_run_id,
@@ -382,10 +378,9 @@ export class IngestService {
         [
           station.id, providerId, endpointId, pipelineRunId, rawPayloadId, normalizeRunId,
           p.observed_at, p.aqi, p.pm25, p.pm10, p.o3, p.no2, p.so2, p.co,
-          p.european_aqi, p.ammonia, p.dust, p.aerosol_optical_depth, p.uv_index,
         ],
       );
-      if (result.rowCount) inserted++;
+      if (result.rowCount || (Array.isArray(result) && result.length > 0)) inserted++;
     }
     if (inserted > 0 && points.length > 0) {
       const latest = points[points.length - 1];
@@ -416,15 +411,15 @@ export class IngestService {
     let inserted = 0;
     for (const p of points) {
       // Use raw SQL for complex ON CONFLICT with many field updates
-      const result = await this.em.getConnection().execute(
+      const result: any = await this.em.getConnection().execute(
         `INSERT INTO core.weather_observations
           (station_id, source_provider_id, source_endpoint_id, pipeline_run_id, raw_payload_id, normalize_run_id,
-           observed_at, temperature_c, humidity_pct, wind_speed_mps, wind_direction_deg, pressure_hpa,
-           visibility_km, precipitation_mm, cloud_cover_pct, weather_code,
-           apparent_temperature_c, dew_point_c, wind_gusts_mps, surface_pressure_hpa, rain_mm, lineage)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,'{}'::jsonb)
+           observed_at, temperature_c, feels_like_c, humidity_pct, wind_speed_mps, wind_direction_deg, pressure_hpa,
+           visibility_km, precipitation_mm, cloud_cover_pct, weather_code, lineage)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'{}'::jsonb)
         ON CONFLICT (station_id, observed_at, source_endpoint_id) DO UPDATE SET
           temperature_c = EXCLUDED.temperature_c,
+          feels_like_c = EXCLUDED.feels_like_c,
           humidity_pct = EXCLUDED.humidity_pct,
           wind_speed_mps = EXCLUDED.wind_speed_mps,
           wind_direction_deg = EXCLUDED.wind_direction_deg,
@@ -433,11 +428,6 @@ export class IngestService {
           precipitation_mm = EXCLUDED.precipitation_mm,
           cloud_cover_pct = EXCLUDED.cloud_cover_pct,
           weather_code = EXCLUDED.weather_code,
-          apparent_temperature_c = EXCLUDED.apparent_temperature_c,
-          dew_point_c = EXCLUDED.dew_point_c,
-          wind_gusts_mps = EXCLUDED.wind_gusts_mps,
-          surface_pressure_hpa = EXCLUDED.surface_pressure_hpa,
-          rain_mm = EXCLUDED.rain_mm,
           raw_payload_id = EXCLUDED.raw_payload_id,
           normalize_run_id = EXCLUDED.normalize_run_id,
           pipeline_run_id = EXCLUDED.pipeline_run_id,
@@ -445,12 +435,11 @@ export class IngestService {
         RETURNING id`,
         [
           station.id, providerId, endpointId, pipelineRunId, rawPayloadId, normalizeRunId,
-          p.observed_at, p.temperature_c, p.humidity_pct, p.wind_speed_mps, p.wind_direction_deg,
+          p.observed_at, p.temperature_c, p.apparent_temperature_c ?? null, p.humidity_pct, p.wind_speed_mps, p.wind_direction_deg,
           p.pressure_hpa, p.visibility_km, p.precipitation_mm, p.cloud_cover_pct, p.weather_code,
-          p.apparent_temperature_c, p.dew_point_c, p.wind_gusts_mps, p.surface_pressure_hpa, p.rain_mm,
         ],
       );
-      if (result.rowCount) inserted++;
+      if (result.rowCount || (Array.isArray(result) && result.length > 0)) inserted++;
     }
     return inserted;
   }
@@ -461,7 +450,7 @@ export class IngestService {
     // Upsert provider
     await this.em.getConnection().execute(
       `INSERT INTO ingest.source_providers (code, name, category, base_url, is_active, config)
-       VALUES ($1,$2,$3,$4,TRUE,$5::jsonb)
+       VALUES (?,?,?,?,TRUE,?::jsonb)
        ON CONFLICT (code) DO NOTHING`,
       [WAQI_PROVIDER_CODE, WAQI_PROVIDER_NAME, WAQI_PROVIDER_CATEGORY, WAQI_PROVIDER_BASE_URL,
        JSON.stringify({ requires_token: true, rate_limit_rpm: 1000 })],
@@ -477,12 +466,12 @@ export class IngestService {
     // Upsert endpoint
     await this.em.getConnection().execute(
       `INSERT INTO ingest.source_endpoints
-         (source_provider_id, code, name, base_url, path, http_method, parser_key, is_active, config)
-       VALUES ($1,$2,$3,$4,$5,'GET',$6,TRUE,'{}'::jsonb)
+         (provider_id, code, name, kind, http_method, path, parser_key, is_active, config)
+       VALUES (?,?,?,'air_quality','GET',?,?,TRUE,'{}'::jsonb)
        ON CONFLICT (code) DO UPDATE
-       SET name = EXCLUDED.name, base_url = EXCLUDED.base_url, parser_key = EXCLUDED.parser_key, is_active = TRUE`,
+       SET name = EXCLUDED.name, parser_key = EXCLUDED.parser_key, is_active = TRUE`,
       [providerId, WAQI_ENDPOINT_CODE, "WAQI Station Feed (realtime)",
-       WAQI_PROVIDER_BASE_URL, "/feed/geo:{lat};{lng}/", WAQI_PARSER_KEY],
+       "/feed/geo:{lat};{lng}/", WAQI_PARSER_KEY],
     );
 
     const endpoint = await this.em.findOne(
@@ -530,10 +519,10 @@ export class IngestService {
         for (const s of stations) {
           await em.getConnection().execute(
             `INSERT INTO ingest.station_source_bindings
-               (station_id, source_provider_id, source_endpoint_id, is_enabled, priority, valid_from, config)
-             VALUES ($1,$2,$3,TRUE,200,now(),'{}'::jsonb)
-             ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
-            [s.id, providerId, endpointId],
+               (station_id, endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
+             VALUES (?,?,'',TRUE,200,now(),'{}'::jsonb)
+             ON CONFLICT (station_id, endpoint_id) DO NOTHING`,
+            [s.id, endpointId],
           );
         }
 
@@ -578,8 +567,8 @@ export class IngestService {
         }
       }
 
-      const status: "succeeded" | "partial" | "failed" =
-        errors.length === 0 ? "succeeded" : aqCount > 0 ? "partial" : "failed";
+      const status: "success" | "partial" | "failed" =
+        errors.length === 0 ? "success" : aqCount > 0 ? "partial" : "failed";
       await this.em.transactional(async (em) => {
         await this.finalizePipelineRun(pipelineRunId, status, {
           stations: stations.length,
@@ -607,7 +596,7 @@ export class IngestService {
   async ensureIqairProviderAndEndpoint() {
     await this.em.getConnection().execute(
       `INSERT INTO ingest.source_providers (code, name, category, base_url, is_active, config)
-       VALUES ($1,$2,$3,$4,TRUE,$5::jsonb)
+       VALUES (?,?,?,?,TRUE,?::jsonb)
        ON CONFLICT (code) DO NOTHING`,
       [
         IQAIR_PROVIDER_CODE,
@@ -624,15 +613,14 @@ export class IngestService {
 
     await this.em.getConnection().execute(
       `INSERT INTO ingest.source_endpoints
-         (source_provider_id, code, name, base_url, path, http_method, parser_key, is_active, config)
-       VALUES ($1,$2,$3,$4,$5,'GET',$6,TRUE,'{}'::jsonb)
+         (provider_id, code, name, kind, http_method, path, parser_key, is_active, config)
+       VALUES (?,?,?,'mixed','GET',?,?,TRUE,'{}'::jsonb)
        ON CONFLICT (code) DO UPDATE
-       SET name = EXCLUDED.name, base_url = EXCLUDED.base_url, parser_key = EXCLUDED.parser_key, is_active = TRUE`,
+       SET name = EXCLUDED.name, parser_key = EXCLUDED.parser_key, is_active = TRUE`,
       [
         providerId,
         IQAIR_NEAREST_CITY_ENDPOINT_CODE,
         "IQAir Nearest City (realtime AQI + weather)",
-        IQAIR_PROVIDER_BASE_URL,
         IQAIR_NEAREST_CITY_PATH,
         IQAIR_NEAREST_CITY_PARSER_KEY,
       ],
@@ -679,10 +667,10 @@ export class IngestService {
         for (const s of stations) {
           await em.getConnection().execute(
             `INSERT INTO ingest.station_source_bindings
-               (station_id, source_provider_id, source_endpoint_id, is_enabled, priority, valid_from, config)
-             VALUES ($1,$2,$3,TRUE,50,now(),'{}'::jsonb)
-             ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
-            [s.id, providerId, endpointId],
+               (station_id, endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
+             VALUES (?,?,'',TRUE,50,now(),'{}'::jsonb)
+             ON CONFLICT (station_id, endpoint_id) DO NOTHING`,
+            [s.id, endpointId],
           );
         }
 
@@ -735,8 +723,8 @@ export class IngestService {
         }
       }
 
-      const status: "succeeded" | "partial" | "failed" =
-        errors.length === 0 ? "succeeded" : aqCount + weatherCount > 0 ? "partial" : "failed";
+      const status: "success" | "partial" | "failed" =
+        errors.length === 0 ? "success" : aqCount + weatherCount > 0 ? "partial" : "failed";
       await this.em.transactional(async () => {
         await this.finalizePipelineRun(pipelineRunId, status, {
           stations: stations.length,
@@ -764,7 +752,7 @@ export class IngestService {
   async ensureOpenweatherProviderAndEndpoints() {
     await this.em.getConnection().execute(
       `INSERT INTO ingest.source_providers (code, name, category, base_url, is_active, config)
-       VALUES ($1,$2,$3,$4,TRUE,$5::jsonb)
+       VALUES (?,?,?,?,TRUE,?::jsonb)
        ON CONFLICT (code) DO NOTHING`,
       [
         OPENWEATHER_PROVIDER_CODE,
@@ -779,15 +767,15 @@ export class IngestService {
     if (!provider) throw new Error("Failed to ensure OpenWeather provider");
     const providerId = provider.id;
 
-    const upsertEndpoint = async (code: string, name: string, path: string, parserKey: string) => {
+    const upsertEndpoint = async (code: string, name: string, path: string, parserKey: string, kind: string) => {
       await this.em.getConnection().execute(
         `INSERT INTO ingest.source_endpoints
-           (source_provider_id, code, name, base_url, path, http_method, parser_key, is_active, config)
-         VALUES ($1,$2,$3,$4,$5,'GET',$6,TRUE,'{}'::jsonb)
+           (provider_id, code, name, kind, http_method, path, parser_key, is_active, config)
+         VALUES (?,?,?,?,'GET',?,?,TRUE,'{}'::jsonb)
          ON CONFLICT (code) DO UPDATE
-         SET name = EXCLUDED.name, base_url = EXCLUDED.base_url, path = EXCLUDED.path,
+         SET name = EXCLUDED.name, path = EXCLUDED.path,
              parser_key = EXCLUDED.parser_key, is_active = TRUE`,
-        [providerId, code, name, OPENWEATHER_PROVIDER_BASE_URL, path, parserKey],
+        [providerId, code, name, kind, path, parserKey],
       );
     };
 
@@ -796,12 +784,14 @@ export class IngestService {
       "OpenWeather Air Pollution (current)",
       OPENWEATHER_AIR_POLLUTION_PATH,
       OPENWEATHER_AIR_POLLUTION_PARSER_KEY,
+      'air_quality',
     );
     await upsertEndpoint(
       OPENWEATHER_WEATHER_ENDPOINT_CODE,
       "OpenWeather Current Weather",
       OPENWEATHER_WEATHER_PATH,
       OPENWEATHER_WEATHER_PARSER_KEY,
+      'weather',
     );
 
     const endpoints = await this.em.find(SourceEndpoint, {
@@ -856,10 +846,10 @@ export class IngestService {
           for (const endpointId of [airEndpointId, weatherEndpointId]) {
             await em.getConnection().execute(
               `INSERT INTO ingest.station_source_bindings
-                 (station_id, source_provider_id, source_endpoint_id, is_enabled, priority, valid_from, config)
-               VALUES ($1,$2,$3,TRUE,150,now(),'{}'::jsonb)
-               ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
-              [s.id, providerId, endpointId],
+                 (station_id, endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
+               VALUES (?,?,'',TRUE,150,now(),'{}'::jsonb)
+               ON CONFLICT (station_id, endpoint_id) DO NOTHING`,
+              [s.id, endpointId],
             );
           }
         }
@@ -926,8 +916,8 @@ export class IngestService {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
 
-      const status: "succeeded" | "partial" | "failed" =
-        errors.length === 0 ? "succeeded" : aqCount + weatherCount > 0 ? "partial" : "failed";
+      const status: "success" | "partial" | "failed" =
+        errors.length === 0 ? "success" : aqCount + weatherCount > 0 ? "partial" : "failed";
       await this.em.transactional(async () => {
         await this.finalizePipelineRun(pipelineRunId, status, {
           stations: stations.length,
@@ -1130,8 +1120,8 @@ export class IngestService {
         }
       }
 
-      const status: "succeeded" | "partial" | "failed" =
-        errors.length === 0 ? "succeeded" : aqCount + weatherCount > 0 ? "partial" : "failed";
+      const status: "success" | "partial" | "failed" =
+        errors.length === 0 ? "success" : aqCount + weatherCount > 0 ? "partial" : "failed";
       await this.em.transactional(async (em) => {
         await this.finalizePipelineRun(
           pipelineRunId,
