@@ -91,7 +91,7 @@ export class UsersController {
           ARRAY_REMOVE(ARRAY_AGG(ups.station_id::text ORDER BY ups.sort_order), NULL) AS pinned_station_ids
         FROM app.user_preferences up
         LEFT JOIN app.user_pinned_stations ups ON ups.user_id = up.user_id
-        WHERE ($1::uuid IS NULL OR up.user_id = $1::uuid)
+        WHERE (?::uuid IS NULL OR up.user_id = ?::uuid)
         GROUP BY up.user_id, up.notification_mode, up.favorite_regions, up.push_enabled, up.email_enabled, up.daily_report_enabled, up.quiet_hours_enabled, up.quiet_hours_start_min, up.quiet_hours_end_min, up.location_lat, up.location_lng, up.created_at
         ORDER BY up.created_at ASC
         LIMIT 1
@@ -137,7 +137,7 @@ export class UsersController {
             ARRAY_REMOVE(ARRAY_AGG(ups.station_id::text ORDER BY ups.sort_order), NULL) AS pinned_station_ids
           FROM app.user_preferences up
           LEFT JOIN app.user_pinned_stations ups ON ups.user_id = up.user_id
-          WHERE up.user_id = $1::uuid
+          WHERE up.user_id = ?::uuid
           GROUP BY up.user_id, up.notification_mode, up.favorite_regions, up.push_enabled, up.email_enabled, up.daily_report_enabled, up.quiet_hours_enabled, up.quiet_hours_start_min, up.quiet_hours_end_min, up.location_lat, up.location_lng, up.created_at
           LIMIT 1
         `,

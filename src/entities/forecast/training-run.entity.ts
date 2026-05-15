@@ -8,7 +8,7 @@ export class TrainingRun {
   @ManyToOne({
     entity: () => 'PipelineRun',
     fieldName: 'pipeline_run_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     unique: true,
     ref: true,
   })
@@ -17,7 +17,7 @@ export class TrainingRun {
   @ManyToOne({
     entity: () => 'ModelVersion',
     fieldName: 'model_version_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     ref: true,
   })
   modelVersionId!: string;

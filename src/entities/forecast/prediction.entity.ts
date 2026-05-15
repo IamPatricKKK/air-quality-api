@@ -9,7 +9,7 @@ export class Prediction {
   @ManyToOne({
     entity: () => 'PredictionRun',
     fieldName: 'prediction_run_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     ref: true,
   })
   predictionRunId!: string;
@@ -17,13 +17,13 @@ export class Prediction {
   @ManyToOne({
     entity: () => 'ModelVersion',
     fieldName: 'model_version_id',
-    onDelete: 'SET NULL',
+    deleteRule: 'set null',
     nullable: true,
     ref: true,
   })
   modelVersionId?: string;
 
-  @ManyToOne({ entity: () => 'Station', fieldName: 'station_id', onDelete: 'CASCADE', ref: true })
+  @ManyToOne({ entity: () => 'Station', fieldName: 'station_id', deleteRule: 'cascade', ref: true })
   stationId!: string;
 
   @Property({ default: 'aqi' })
@@ -48,7 +48,7 @@ export class Prediction {
   @ManyToOne({
     entity: () => 'FeatureSnapshot',
     fieldName: 'features_snapshot_id',
-    onDelete: 'SET NULL',
+    deleteRule: 'set null',
     nullable: true,
     ref: true,
   })

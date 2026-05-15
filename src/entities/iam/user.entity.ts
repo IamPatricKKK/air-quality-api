@@ -12,7 +12,7 @@ import { UserProfile } from './user-profile.entity';
 import { UserRole } from './user-role.entity';
 import { RefreshSession } from './refresh-session.entity';
 
-@Entity({ tableName: 'iam.users', schema: 'iam' })
+@Entity({ tableName: 'iam.users' })
 export class User {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;

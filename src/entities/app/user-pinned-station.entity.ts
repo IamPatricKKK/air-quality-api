@@ -8,10 +8,10 @@ export class UserPinnedStation {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
 
-  @ManyToOne(() => User, { onDelete: 'CASCADE' })
+  @ManyToOne(() => User, { deleteRule: 'cascade' })
   user!: User;
 
-  @ManyToOne(() => Station, { onDelete: 'CASCADE' })
+  @ManyToOne(() => Station, { deleteRule: 'cascade' })
   station!: Station;
 
   @Property({ type: 'int', default: 0 })

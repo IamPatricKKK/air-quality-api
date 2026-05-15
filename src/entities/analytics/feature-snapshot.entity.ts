@@ -5,13 +5,13 @@ export class FeatureSnapshot {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
 
-  @ManyToOne({ entity: () => 'Station', fieldName: 'station_id', onDelete: 'CASCADE', ref: true })
+  @ManyToOne({ entity: () => 'Station', fieldName: 'station_id', deleteRule: 'cascade', ref: true })
   stationId!: string;
 
   @ManyToOne({
     entity: () => 'PipelineRun',
     fieldName: 'built_from_pipeline_run_id',
-    onDelete: 'SET NULL',
+    deleteRule: 'set null',
     nullable: true,
     ref: true,
   })

@@ -6,7 +6,7 @@ export class UserPreference {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
 
-  @ManyToOne(() => User, { onDelete: 'CASCADE', unique: true })
+  @ManyToOne(() => User, { deleteRule: 'cascade', unique: true })
   user!: User;
 
   @Property({ type: 'text', default: 'all' })

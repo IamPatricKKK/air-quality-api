@@ -8,12 +8,12 @@ export class ForecastPoint {
   @ManyToOne({
     entity: () => 'ForecastRun',
     fieldName: 'forecast_run_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     ref: true,
   })
   forecastRunId!: string;
 
-  @ManyToOne({ entity: () => 'Station', fieldName: 'station_id', onDelete: 'CASCADE', ref: true })
+  @ManyToOne({ entity: () => 'Station', fieldName: 'station_id', deleteRule: 'cascade', ref: true })
   stationId!: string;
 
   @Property()

@@ -9,7 +9,7 @@ import {
 import { StationType } from '../iam/enums';
 import { Area } from './area.entity';
 
-@Entity({ tableName: 'catalog.stations', schema: 'catalog' })
+@Entity({ tableName: 'catalog.stations' })
 export class Station {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
@@ -23,7 +23,7 @@ export class Station {
   @ManyToOne({
     entity: () => Area,
     nullable: true,
-    onDelete: 'set null',
+    deleteRule: 'set null',
   })
   area?: Rel<Area>;
 

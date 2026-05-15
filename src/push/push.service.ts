@@ -67,7 +67,7 @@ export class PushService {
   async saveSubscription(userId: string, input: PushSubscriptionInput): Promise<{ id: string }> {
     const result = (await this.em.getConnection().execute(
       `INSERT INTO app.push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
-       VALUES ($1, $2, $3, $4, $5)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (endpoint) DO UPDATE
          SET user_id = EXCLUDED.user_id,
              p256dh = EXCLUDED.p256dh,
@@ -84,7 +84,7 @@ export class PushService {
 
   async removeSubscription(userId: string, endpoint: string): Promise<{ success: boolean }> {
     await this.em.getConnection().execute(
-      `DELETE FROM app.push_subscriptions WHERE endpoint = $1 AND user_id = $2`,
+      `DELETE FROM app.push_subscriptions WHERE endpoint = ? AND user_id = ?`,
       [endpoint, userId],
     );
     return { success: true };
@@ -95,7 +95,7 @@ export class PushService {
 
     const quietResult = (await this.em.getConnection().execute(
       `SELECT quiet_hours_enabled, quiet_hours_start_min, quiet_hours_end_min
-       FROM app.user_preferences WHERE user_id = $1 LIMIT 1`,
+       FROM app.user_preferences WHERE user_id = ? LIMIT 1`,
       [userId],
     )) as QuietHoursRow[] | { rows: QuietHoursRow[] };
     const quietRows: QuietHoursRow[] = Array.isArray(quietResult)
@@ -112,7 +112,7 @@ export class PushService {
     }
 
     const subsResult = (await this.em.getConnection().execute(
-      `SELECT id, endpoint, p256dh, auth FROM app.push_subscriptions WHERE user_id = $1`,
+      `SELECT id, endpoint, p256dh, auth FROM app.push_subscriptions WHERE user_id = ?`,
       [userId],
     )) as StoredSubscription[] | { rows: StoredSubscription[] };
     const rows: StoredSubscription[] = Array.isArray(subsResult)
@@ -136,7 +136,7 @@ export class PushService {
           );
           sent += 1;
           await this.em.getConnection().execute(
-            `UPDATE app.push_subscriptions SET last_used_at = now() WHERE id = $1`,
+            `UPDATE app.push_subscriptions SET last_used_at = now() WHERE id = ?`,
             [sub.id],
           );
         } catch (err: unknown) {
@@ -146,7 +146,7 @@ export class PushService {
               : 0;
           if (statusCode === 404 || statusCode === 410) {
             await this.em.getConnection().execute(
-              `DELETE FROM app.push_subscriptions WHERE id = $1`,
+              `DELETE FROM app.push_subscriptions WHERE id = ?`,
               [sub.id],
             );
             this.logger.log(`Removed stale push subscription ${sub.id}`);

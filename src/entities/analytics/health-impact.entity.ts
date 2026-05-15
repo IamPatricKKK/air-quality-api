@@ -8,7 +8,7 @@ export class HealthImpact {
   @ManyToOne({
     entity: () => 'Station',
     fieldName: 'station_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     unique: true,
     ref: true,
   })

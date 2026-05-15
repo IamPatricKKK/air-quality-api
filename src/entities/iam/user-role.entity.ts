@@ -9,7 +9,7 @@ import {
 import { User } from './user.entity';
 import { Role } from './role.entity';
 
-@Entity({ tableName: 'iam.user_roles', schema: 'iam' })
+@Entity({ tableName: 'iam.user_roles' })
 @Unique({
   properties: ['user', 'role'],
 })
@@ -19,20 +19,20 @@ export class UserRole {
 
   @ManyToOne({
     entity: () => User,
-    onDelete: 'cascade',
+    deleteRule: 'cascade',
   })
   user!: Rel<User>;
 
   @ManyToOne({
     entity: () => Role,
-    onDelete: 'cascade',
+    deleteRule: 'cascade',
   })
   role!: Rel<Role>;
 
   @ManyToOne({
     entity: () => User,
     nullable: true,
-    onDelete: 'set null',
+    deleteRule: 'set null',
   })
   assignedBy?: Rel<User>;
 

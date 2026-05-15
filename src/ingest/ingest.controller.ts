@@ -95,8 +95,8 @@ export class IngestController {
        FROM core.air_quality_observations o
        JOIN ingest.source_providers sp ON sp.id = o.source_provider_id
        JOIN catalog.stations s ON s.id = o.station_id
-       WHERE o.observed_at >= now() - ($1 || ' hours')::interval
-         ${stationId ? "AND o.station_id = $2" : ""}
+       WHERE o.observed_at >= now() - (? || ' hours')::interval
+         ${stationId ? "AND o.station_id = ?" : ""}
        ORDER BY o.station_id, hour DESC, sp.code
        LIMIT 500`,
       stationId ? [h, stationId] : [h],
@@ -165,10 +165,10 @@ export class IngestController {
     const row = await queryRow<Record<string, any>>(
       `UPDATE ingest.source_providers
        SET
-         is_active = COALESCE($2, is_active),
-         config = CASE WHEN $3::jsonb IS NULL THEN config ELSE config || $3::jsonb END,
+         is_active = COALESCE(?, is_active),
+         config = CASE WHEN ?::jsonb IS NULL THEN config ELSE config || ?::jsonb END,
          updated_at = now()
-       WHERE id = $1::uuid
+       WHERE id = ?::uuid
        RETURNING
          id::text                     AS "id",
          code,
@@ -229,12 +229,12 @@ export class IngestController {
     const row = await queryRow<Record<string, any>>(
       `UPDATE ingest.source_endpoints
        SET
-         is_active = COALESCE($2, is_active),
-         schedule_expression = COALESCE($3, schedule_expression),
-         parser_key = COALESCE($4, parser_key),
-         config = CASE WHEN $5::jsonb IS NULL THEN config ELSE config || $5::jsonb END,
+         is_active = COALESCE(?, is_active),
+         schedule_expression = COALESCE(?, schedule_expression),
+         parser_key = COALESCE(?, parser_key),
+         config = CASE WHEN ?::jsonb IS NULL THEN config ELSE config || ?::jsonb END,
          updated_at = now()
-       WHERE id = $1::uuid
+       WHERE id = ?::uuid
        RETURNING
          id::text                         AS "id",
          (SELECT code FROM ingest.source_providers WHERE id = provider_id) AS "providerCode",
@@ -302,12 +302,12 @@ export class IngestController {
     const row = await queryRow<Record<string, any>>(
       `UPDATE ingest.station_source_bindings ssb
        SET
-         is_enabled = COALESCE($2, is_enabled),
-         priority   = COALESCE($3, priority),
-         valid_to   = COALESCE($4::timestamptz, valid_to),
-         config     = CASE WHEN $5::jsonb IS NULL THEN config ELSE config || $5::jsonb END,
+         is_enabled = COALESCE(?, is_enabled),
+         priority   = COALESCE(?, priority),
+         valid_to   = COALESCE(?::timestamptz, valid_to),
+         config     = CASE WHEN ?::jsonb IS NULL THEN config ELSE config || ?::jsonb END,
          updated_at = now()
-       WHERE ssb.id = $1::uuid
+       WHERE ssb.id = ?::uuid
        RETURNING
          ssb.id::text                                                        AS "id",
          (SELECT s.id::text FROM catalog.stations s WHERE s.id = ssb.station_id) AS "stationId",

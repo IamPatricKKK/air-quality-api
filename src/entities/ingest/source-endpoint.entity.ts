@@ -6,7 +6,7 @@ export class SourceEndpoint {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
 
-  @ManyToOne(() => SourceProvider, { onDelete: 'CASCADE' })
+  @ManyToOne(() => SourceProvider, { deleteRule: 'cascade' })
   provider!: SourceProvider;
 
   @Property({ type: 'text', unique: true })

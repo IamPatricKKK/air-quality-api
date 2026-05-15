@@ -107,9 +107,9 @@ export class AlertEvaluatorService {
     const title = `Canh bao: ${rule.metric.toUpperCase()} tai ${reading.station_name}`;
     const message = `${rule.metric.toUpperCase()} = ${value} (nguong: ${rule.operator} ${rule.threshold}) tai tram ${reading.station_name}.`;
 
-    const result = await this.em.getConnection().execute(
+    const result: any = await this.em.getConnection().execute(
       `INSERT INTO app.alerts (rule_id, user_id, station_id, metric, threshold, actual_value, aqi_category, title, message)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
        RETURNING id`,
       [
         rule.id,
@@ -124,10 +124,11 @@ export class AlertEvaluatorService {
       ],
     );
 
-    if (!result.rows?.[0]) return null;
+    const resultRow = result.rows ? result.rows[0] : result[0];
+    if (!resultRow) return null;
 
     const alert: CreatedAlert = {
-      id: result.rows[0].id,
+      id: resultRow.id,
       rule_id: rule.id,
       user_id: rule.user_id,
       station_id: reading.station_id,
@@ -169,12 +170,13 @@ export class AlertEvaluatorService {
   }
 
   private async isDuplicateWithinCooldown(ruleId: string, cooldownMin: number): Promise<boolean> {
-    const row = await this.em.getConnection().execute(
+    const row: any = await this.em.getConnection().execute(
       `SELECT COUNT(*)::TEXT AS cnt FROM app.alerts
-       WHERE rule_id = $1 AND created_at > now() - ($2 || ' minutes')::INTERVAL`,
+       WHERE rule_id = ? AND created_at > now() - (? || ' minutes')::INTERVAL`,
       [ruleId, String(cooldownMin)],
     );
-    const cnt = row.rows?.[0]?.cnt;
+    const r = row.rows ? row.rows[0] : row[0];
+    const cnt = r?.cnt;
     return cnt ? parseInt(cnt, 10) > 0 : false;
   }
 
@@ -188,7 +190,7 @@ export class AlertEvaluatorService {
   }
 
   private async getLatestReadings(): Promise<LatestReading[]> {
-    const rows = await this.em.getConnection().execute(`
+    const rows: any = await this.em.getConnection().execute(`
       SELECT DISTINCT ON (s.id)
         s.id          AS station_id,
         s.name        AS station_name,
@@ -205,6 +207,6 @@ export class AlertEvaluatorService {
       WHERE a.observed_at > now() - INTERVAL '2 hours'
       ORDER BY s.id, a.observed_at DESC
     `);
-    return rows.rows ?? [];
+    return Array.isArray(rows) ? rows : (rows.rows ?? []);
   }
 }

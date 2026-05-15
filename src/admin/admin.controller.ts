@@ -12,12 +12,7 @@ export class AdminController {
   async getDashboard(@Headers("authorization") authHeader?: string) {
     requireAuth(authHeader, ADMIN_ROLES);
 
-    const counts = await this.em.getConnection().execute<{
-      users: string;
-      stations: string;
-      providers: string;
-      pipelines_running: string;
-    }>(`
+    const counts: any = await this.em.getConnection().execute(`
       SELECT
         (SELECT COUNT(*) FROM iam.users) AS users,
         (SELECT COUNT(*) FROM catalog.stations) AS stations,
@@ -25,17 +20,7 @@ export class AdminController {
         (SELECT COUNT(*) FROM ingest.pipeline_runs WHERE status = 'running') AS pipelines_running
     `);
 
-    const latestStations = await this.em.getConnection().execute<{
-      station_id: string;
-      station_code: string;
-      station_name: string;
-      area_id: string | null;
-      area_name: string | null;
-      lat: number;
-      lng: number;
-      aqi: number;
-      source_provider_code: string | null;
-    }>(`
+    const latestStations: any = await this.em.getConnection().execute(`
       SELECT
         latest.station_id,
         latest.station_code,
@@ -89,15 +74,7 @@ export class AdminController {
   async getUsers(@Headers("authorization") authHeader?: string) {
     requireAuth(authHeader, ADMIN_ROLES);
 
-    const rows = await this.em.getConnection().execute<{
-      id: string;
-      email: string;
-      display_name: string | null;
-      status: string;
-      created_at: string;
-      last_login_at: string | null;
-      roles: string[] | null;
-    }>(`
+    const rows: any = await this.em.getConnection().execute(`
       SELECT
         u.id,
         u.email,
@@ -132,16 +109,7 @@ export class AdminController {
   async getStations(@Headers("authorization") authHeader?: string) {
     requireAuth(authHeader, ADMIN_ROLES);
 
-    const rows = await this.em.getConnection().execute<{
-      station_id: string;
-      station_code: string;
-      station_name: string;
-      area_name: string | null;
-      lat: number;
-      lng: number;
-      aqi: number | null;
-      source_provider_code: string | null;
-    }>(`
+    const rows: any = await this.em.getConnection().execute(`
       SELECT
         latest.station_id,
         latest.station_code,
@@ -174,14 +142,7 @@ export class AdminController {
   async getNotifications(@Headers("authorization") authHeader?: string) {
     requireAuth(authHeader, ADMIN_ROLES);
 
-    const rows = await this.em.getConnection().execute<{
-      id: string;
-      title: string;
-      audience: string | null;
-      channel: string | null;
-      status: string;
-      created_at: string;
-    }>(`
+    const rows: any = await this.em.getConnection().execute(`
       SELECT
         id,
         title,

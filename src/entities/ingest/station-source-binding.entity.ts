@@ -10,13 +10,13 @@ export class StationSourceBinding {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
 
-  @ManyToOne(() => Station, { onDelete: 'CASCADE' })
+  @ManyToOne(() => Station, { deleteRule: 'cascade' })
   station!: Station;
 
-  @ManyToOne(() => SourceProvider, { fieldName: 'source_provider_id', onDelete: 'CASCADE' })
+  @ManyToOne(() => SourceProvider, { fieldName: 'source_provider_id', deleteRule: 'cascade' })
   sourceProvider!: SourceProvider;
 
-  @ManyToOne(() => SourceEndpoint, { fieldName: 'source_endpoint_id', onDelete: 'CASCADE' })
+  @ManyToOne(() => SourceEndpoint, { fieldName: 'source_endpoint_id', deleteRule: 'cascade' })
   sourceEndpoint!: SourceEndpoint;
 
   @Property({ type: 'text', default: '' })
@@ -37,7 +37,7 @@ export class StationSourceBinding {
   @Property({ type: 'timestamptz', nullable: true })
   validTo?: Date;
 
-  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true })
+  @ManyToOne(() => User, { deleteRule: 'set null', nullable: true })
   updatedByUser?: User;
 
   @Property({ type: 'timestamptz', defaultRaw: 'now()' })

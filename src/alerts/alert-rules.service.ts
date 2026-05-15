@@ -41,27 +41,27 @@ export class AlertRulesService {
   constructor(private readonly em: EntityManager) {}
 
   async listByUser(userId: string): Promise<AlertRuleRow[]> {
-    const rows = await this.em.getConnection().execute(
-      `SELECT r.id, r.user_id, r.station_id, r.metricCode as metric, r.operator, r.thresholdValue as threshold,
-              r.channels, r.cooldownMinutes as cooldown_min, r.isActive as is_active, r.createdAt as created_at, r.updatedAt as updated_at,
+    const rows: any = await this.em.getConnection().execute(
+      `SELECT r.id, r.user_id, r.station_id, r.metric_code as metric, r.operator, r.threshold_value as threshold,
+              r.channels, r.cooldown_minutes as cooldown_min, r.is_active, r.created_at, r.updated_at,
               s.name AS station_name
        FROM app.user_alert_rules r
        LEFT JOIN catalog.stations s ON s.id = r.station_id
-       WHERE r.user_id = $1
-       ORDER BY r.createdAt DESC`,
+       WHERE r.user_id = ?
+       ORDER BY r.created_at DESC`,
       [userId],
     );
-    return rows.rows ?? [];
+    return Array.isArray(rows) ? rows : (rows.rows ?? []);
   }
 
   async getById(ruleId: string, userId: string): Promise<AlertRuleRow> {
-    const rows = await this.em.getConnection().execute(
-      `SELECT r.id, r.user_id, r.station_id, r.metricCode as metric, r.operator, r.thresholdValue as threshold,
-              r.channels, r.cooldownMinutes as cooldown_min, r.isActive as is_active, r.createdAt as created_at, r.updatedAt as updated_at,
+    const rows: any = await this.em.getConnection().execute(
+      `SELECT r.id, r.user_id, r.station_id, r.metric_code as metric, r.operator, r.threshold_value as threshold,
+              r.channels, r.cooldown_minutes as cooldown_min, r.is_active, r.created_at, r.updated_at,
               s.name AS station_name
        FROM app.user_alert_rules r
        LEFT JOIN catalog.stations s ON s.id = r.station_id
-       WHERE r.id = $1 AND r.user_id = $2`,
+       WHERE r.id = ? AND r.user_id = ?`,
       [ruleId, userId],
     );
     const row = rows.rows?.[0];
@@ -139,14 +139,14 @@ export class AlertRulesService {
   }
 
   async listActiveRules(): Promise<AlertRuleRow[]> {
-    const rows = await this.em.getConnection().execute(
-      `SELECT r.id, r.user_id, r.station_id, r.metricCode as metric, r.operator, r.thresholdValue as threshold,
-              r.channels, r.cooldownMinutes as cooldown_min, r.isActive as is_active, r.createdAt as created_at, r.updatedAt as updated_at,
+    const rows: any = await this.em.getConnection().execute(
+      `SELECT r.id, r.user_id, r.station_id, r.metric_code as metric, r.operator, r.threshold_value as threshold,
+              r.channels, r.cooldown_minutes as cooldown_min, r.is_active, r.created_at, r.updated_at,
               s.name AS station_name
        FROM app.user_alert_rules r
        LEFT JOIN catalog.stations s ON s.id = r.station_id
-       WHERE r.isActive = TRUE`,
+       WHERE r.is_active = TRUE`,
     );
-    return rows.rows ?? [];
+    return Array.isArray(rows) ? rows : (rows.rows ?? []);
   }
 }

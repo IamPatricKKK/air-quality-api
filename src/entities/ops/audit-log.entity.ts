@@ -12,7 +12,7 @@ export class AuditLog {
   @ManyToOne({
     entity: () => 'User',
     fieldName: 'actor_user_id',
-    onDelete: 'SET NULL',
+    deleteRule: 'set null',
     nullable: true,
     ref: true,
   })

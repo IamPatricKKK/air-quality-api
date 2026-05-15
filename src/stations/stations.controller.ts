@@ -56,7 +56,7 @@ export class StationsController {
 
   @Get()
   async getStations() {
-    const rows = await this.em.getConnection().execute<LatestRow>(`
+    const rows: any = await this.em.getConnection().execute(`
       SELECT
         latest.station_id,
         latest.station_code,
@@ -99,8 +99,8 @@ export class StationsController {
       `
       SELECT observed_at AS recorded_at, aqi, pm25, pm10, o3, no2
       FROM core.air_quality_observations
-      WHERE station_id = $1
-        AND observed_at >= now() - ($2::text || ' hours')::interval
+      WHERE station_id = ?
+        AND observed_at >= now() - (?::text || ' hours')::interval
       ORDER BY observed_at ASC
       `,
       [id, limitHours],
@@ -116,7 +116,7 @@ export class StationsController {
   ) {
     const limitHours = Math.min(Math.max(Number(hours ?? 24), 1), 24 * 30);
     const stationRows = await this.em.getConnection().execute<{ code: string; name: string }>(
-      `SELECT code, name FROM catalog.stations WHERE id = $1 LIMIT 1`,
+      `SELECT code, name FROM catalog.stations WHERE id = ? LIMIT 1`,
       [id],
     );
     const station = stationRows?.[0];
@@ -134,8 +134,8 @@ export class StationsController {
     }>(
       `SELECT observed_at, aqi, pm25, pm10, o3, no2, so2, co
        FROM core.air_quality_observations
-       WHERE station_id = $1
-         AND observed_at >= now() - ($2::text || ' hours')::interval
+       WHERE station_id = ?
+         AND observed_at >= now() - (?::text || ' hours')::interval
        ORDER BY observed_at ASC`,
       [id, limitHours],
     );
@@ -166,7 +166,7 @@ export class StationsController {
   @Get(":id/analytics")
   async getStationAnalytics(@Param("id") id: string) {
     const rows = await this.em.getConnection().execute<any>(
-      `SELECT * FROM app.v_station_analytics WHERE station_id = $1`,
+      `SELECT * FROM app.v_station_analytics WHERE station_id = ?`,
       [id],
     );
     const row = rows?.[0];

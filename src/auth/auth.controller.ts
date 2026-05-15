@@ -56,8 +56,8 @@ async function loadUserByEmail(em: EntityManager, email: string, password: strin
       LEFT JOIN iam.user_profiles up ON up.user_id = u.id
       LEFT JOIN iam.user_roles ur ON ur.user_id = u.id
       LEFT JOIN iam.roles r ON r.id = ur.role_id
-      WHERE u.email = $1
-        AND u.password_hash = crypt($2, u.password_hash)
+      WHERE u.email = ?
+        AND u.password_hash = crypt(?, u.password_hash)
       GROUP BY u.id, up.display_name
       LIMIT 1
     `,
@@ -165,7 +165,7 @@ export class AuthController {
         const result = await em.getConnection().execute<{ id: string }>(
           `
             INSERT INTO iam.users (email, password_hash, status)
-            VALUES ($1, crypt($2, gen_salt('bf')), 'active')
+            VALUES (?, crypt(?, gen_salt('bf')), 'active')
             ON CONFLICT (email) DO NOTHING
             RETURNING id
           `,
@@ -312,7 +312,7 @@ export class AuthController {
         LEFT JOIN iam.user_profiles up ON up.user_id = u.id
         LEFT JOIN iam.user_roles ur ON ur.user_id = u.id
         LEFT JOIN iam.roles r ON r.id = ur.role_id
-        WHERE u.id = $1::uuid
+        WHERE u.id = ?::uuid
         GROUP BY u.id, up.display_name
         LIMIT 1
       `,

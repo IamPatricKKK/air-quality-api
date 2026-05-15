@@ -22,7 +22,7 @@ export class ServiceConfig {
   @ManyToOne({
     entity: () => 'User',
     fieldName: 'updated_by_user_id',
-    onDelete: 'SET NULL',
+    deleteRule: 'set null',
     nullable: true,
     ref: true,
   })

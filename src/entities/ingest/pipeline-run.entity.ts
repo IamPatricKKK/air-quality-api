@@ -8,13 +8,13 @@ export class PipelineRun {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
 
-  @ManyToOne(() => PipelineDefinition, { onDelete: 'CASCADE' })
+  @ManyToOne(() => PipelineDefinition, { deleteRule: 'cascade' })
   pipelineDefinition!: PipelineDefinition;
 
-  @ManyToOne(() => SourceEndpoint, { onDelete: 'SET NULL', nullable: true })
+  @ManyToOne(() => SourceEndpoint, { deleteRule: 'set null', nullable: true })
   sourceEndpoint?: SourceEndpoint;
 
-  @ManyToOne(() => User, { onDelete: 'SET NULL', nullable: true })
+  @ManyToOne(() => User, { deleteRule: 'set null', nullable: true })
   requestedByUser?: User;
 
   @Property({ type: 'text', default: 'scheduled' })

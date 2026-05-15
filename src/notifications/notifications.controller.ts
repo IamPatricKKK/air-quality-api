@@ -10,7 +10,7 @@ export class NotificationsController {
   @Get()
   async getNotifications(@Headers("authorization") authHeader?: string) {
     const claims = requireAuth(authHeader);
-    const rows = await this.em.getConnection().execute<{
+    const rows: any = await this.em.getConnection().execute<{
       id: string;
       title: string;
       body: string;
@@ -24,7 +24,7 @@ export class NotificationsController {
         created_at,
         station_id
       FROM app.notifications
-      WHERE user_id = $1::uuid
+      WHERE user_id = ?::uuid
       ORDER BY created_at DESC
       LIMIT 50
     `, [claims.sub]);

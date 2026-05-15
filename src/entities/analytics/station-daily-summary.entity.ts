@@ -9,12 +9,12 @@ export class StationDailySummary {
   @ManyToOne({
     entity: () => 'AnalysisRun',
     fieldName: 'analysis_run_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     ref: true,
   })
   analysisRunId!: string;
 
-  @ManyToOne({ entity: () => 'Station', fieldName: 'station_id', onDelete: 'CASCADE', ref: true })
+  @ManyToOne({ entity: () => 'Station', fieldName: 'station_id', deleteRule: 'cascade', ref: true })
   stationId!: string;
 
   @Property({ type: 'date' })

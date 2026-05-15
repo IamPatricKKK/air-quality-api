@@ -8,7 +8,7 @@ export class TrafficObservation {
   @ManyToOne({
     entity: () => 'Area',
     fieldName: 'area_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     nullable: true,
     ref: true,
   })
@@ -17,7 +17,7 @@ export class TrafficObservation {
   @ManyToOne({
     entity: () => 'Station',
     fieldName: 'station_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     nullable: true,
     ref: true,
   })
@@ -26,7 +26,7 @@ export class TrafficObservation {
   @ManyToOne({
     entity: () => 'SourceProvider',
     fieldName: 'source_provider_id',
-    onDelete: 'RESTRICT',
+    deleteRule: 'no action',
     ref: true,
   })
   sourceProviderId!: string;
@@ -34,7 +34,7 @@ export class TrafficObservation {
   @ManyToOne({
     entity: () => 'SourceEndpoint',
     fieldName: 'source_endpoint_id',
-    onDelete: 'RESTRICT',
+    deleteRule: 'no action',
     ref: true,
   })
   sourceEndpointId!: string;
@@ -42,7 +42,7 @@ export class TrafficObservation {
   @ManyToOne({
     entity: () => 'PipelineRun',
     fieldName: 'pipeline_run_id',
-    onDelete: 'RESTRICT',
+    deleteRule: 'no action',
     ref: true,
   })
   pipelineRunId!: string;
@@ -50,7 +50,7 @@ export class TrafficObservation {
   @ManyToOne({
     entity: () => 'RawPayload',
     fieldName: 'raw_payload_id',
-    onDelete: 'SET NULL',
+    deleteRule: 'set null',
     nullable: true,
     ref: true,
   })
@@ -59,7 +59,7 @@ export class TrafficObservation {
   @ManyToOne({
     entity: () => 'NormalizeRun',
     fieldName: 'normalize_run_id',
-    onDelete: 'SET NULL',
+    deleteRule: 'set null',
     nullable: true,
     ref: true,
   })

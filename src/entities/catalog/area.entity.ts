@@ -11,7 +11,7 @@ import {
 } from '@mikro-orm/core';
 import { AreaLevel } from '../iam/enums';
 
-@Entity({ tableName: 'catalog.areas', schema: 'catalog' })
+@Entity({ tableName: 'catalog.areas' })
 @Unique({
   properties: ['level', 'code'],
 })
@@ -22,7 +22,7 @@ export class Area {
   @ManyToOne({
     entity: () => Area,
     nullable: true,
-    onDelete: 'set null',
+    deleteRule: 'set null',
   })
   parent?: Rel<Area>;
 

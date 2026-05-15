@@ -11,19 +11,19 @@ export class RawPayload {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
 
-  @ManyToOne(() => PipelineRun, { onDelete: 'CASCADE' })
+  @ManyToOne(() => PipelineRun, { deleteRule: 'cascade' })
   pipelineRun!: PipelineRun;
 
-  @ManyToOne(() => OutboundRequest, { onDelete: 'SET NULL', nullable: true })
+  @ManyToOne(() => OutboundRequest, { deleteRule: 'set null', nullable: true })
   outboundRequest?: OutboundRequest;
 
-  @ManyToOne(() => SourceProvider, { onDelete: 'CASCADE' })
+  @ManyToOne(() => SourceProvider, { deleteRule: 'cascade' })
   sourceProvider!: SourceProvider;
 
-  @ManyToOne(() => SourceEndpoint, { onDelete: 'CASCADE' })
+  @ManyToOne(() => SourceEndpoint, { deleteRule: 'cascade' })
   sourceEndpoint!: SourceEndpoint;
 
-  @ManyToOne(() => Station, { onDelete: 'SET NULL', nullable: true })
+  @ManyToOne(() => Station, { deleteRule: 'set null', nullable: true })
   station?: Station;
 
   @Property({ type: 'text', default: 'json' })

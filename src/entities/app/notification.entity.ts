@@ -8,13 +8,13 @@ export class Notification {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
 
-  @ManyToOne(() => User, { onDelete: 'CASCADE' })
+  @ManyToOne(() => User, { deleteRule: 'cascade' })
   user!: User;
 
-  @ManyToOne(() => NotificationTemplate, { onDelete: 'SET NULL', nullable: true })
+  @ManyToOne(() => NotificationTemplate, { deleteRule: 'set null', nullable: true })
   template?: NotificationTemplate;
 
-  @ManyToOne(() => Station, { onDelete: 'SET NULL', nullable: true })
+  @ManyToOne(() => Station, { deleteRule: 'set null', nullable: true })
   station?: Station;
 
   @Property({ type: 'text', default: 'system' })

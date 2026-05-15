@@ -8,7 +8,7 @@ export class AnalysisReport {
   @ManyToOne({
     entity: () => 'AnalysisRun',
     fieldName: 'analysis_run_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     ref: true,
   })
   analysisRunId!: string;
@@ -16,7 +16,7 @@ export class AnalysisReport {
   @ManyToOne({
     entity: () => 'Station',
     fieldName: 'station_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     nullable: true,
     ref: true,
   })
@@ -25,7 +25,7 @@ export class AnalysisReport {
   @ManyToOne({
     entity: () => 'Area',
     fieldName: 'area_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     nullable: true,
     ref: true,
   })

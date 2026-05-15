@@ -7,7 +7,7 @@ export class NotificationDelivery {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
 
-  @ManyToOne(() => Notification, { onDelete: 'CASCADE' })
+  @ManyToOne(() => Notification, { deleteRule: 'cascade' })
   notification!: Notification;
 
   @Property({ type: 'text' })

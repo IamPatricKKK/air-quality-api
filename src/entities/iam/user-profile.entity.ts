@@ -7,7 +7,7 @@ import {
 } from '@mikro-orm/core';
 import { User } from './user.entity';
 
-@Entity({ tableName: 'iam.user_profiles', schema: 'iam' })
+@Entity({ tableName: 'iam.user_profiles' })
 export class UserProfile {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
@@ -15,7 +15,7 @@ export class UserProfile {
   @OneToOne({
     entity: () => User,
     unique: true,
-    onDelete: 'cascade',
+    deleteRule: 'cascade',
   })
   user!: Rel<User>;
 

@@ -81,20 +81,20 @@ export class DeliveryDispatcher {
   }
 
   private async createDelivery(alertId: string, channel: string): Promise<string | null> {
-    const result = await this.em.getConnection().execute(
+    const result: any = await this.em.getConnection().execute(
       `INSERT INTO app.alert_deliveries (alert_id, channel, status)
-       VALUES ($1, $2, 'pending') RETURNING id`,
+       VALUES (?, ?, 'pending') RETURNING id`,
       [alertId, channel],
     );
-    return result.rows?.[0]?.id ?? null;
+    const r = result.rows ? result.rows[0] : result[0]; return r?.id ?? null;
   }
 
   private async markDelivery(deliveryId: string, status: string, errorMessage?: string): Promise<void> {
     await this.em.getConnection().execute(
       `UPDATE app.alert_deliveries
-       SET status = $2, error_message = $3, sent_at = CASE WHEN $2 = 'sent' THEN now() ELSE sent_at END
-       WHERE id = $1`,
-      [deliveryId, status, errorMessage ?? null],
+       SET status = ?, error_message = ?, sent_at = CASE WHEN ? = 'sent' THEN now() ELSE sent_at END
+       WHERE id = ?`,
+      [status, errorMessage ?? null, status, deliveryId],
     );
   }
 

@@ -9,7 +9,7 @@ export class ModelVersion {
   @ManyToOne({
     entity: () => 'ModelRegistry',
     fieldName: 'model_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     ref: true,
   })
   modelId!: string;

@@ -7,14 +7,14 @@ import {
 } from '@mikro-orm/core';
 import { User } from './user.entity';
 
-@Entity({ tableName: 'iam.refresh_sessions', schema: 'iam' })
+@Entity({ tableName: 'iam.refresh_sessions' })
 export class RefreshSession {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
 
   @ManyToOne({
     entity: () => User,
-    onDelete: 'cascade',
+    deleteRule: 'cascade',
   })
   user!: Rel<User>;
 

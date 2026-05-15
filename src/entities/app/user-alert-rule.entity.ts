@@ -7,10 +7,10 @@ export class UserAlertRule {
   @PrimaryKey({ type: 'uuid', defaultRaw: 'gen_random_uuid()' })
   id!: string;
 
-  @ManyToOne(() => User, { onDelete: 'CASCADE' })
+  @ManyToOne(() => User, { deleteRule: 'cascade' })
   user!: User;
 
-  @ManyToOne(() => Station, { onDelete: 'CASCADE', nullable: true })
+  @ManyToOne(() => Station, { deleteRule: 'cascade', nullable: true })
   station?: Station;
 
   @Property({ type: 'text' })

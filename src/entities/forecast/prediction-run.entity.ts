@@ -8,7 +8,7 @@ export class PredictionRun {
   @ManyToOne({
     entity: () => 'PipelineRun',
     fieldName: 'pipeline_run_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     unique: true,
     ref: true,
   })
@@ -17,12 +17,12 @@ export class PredictionRun {
   @ManyToOne({
     entity: () => 'ModelVersion',
     fieldName: 'model_version_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     ref: true,
   })
   modelVersionId!: string;
 
-  @ManyToOne({ entity: () => 'Station', fieldName: 'station_id', onDelete: 'CASCADE', ref: true })
+  @ManyToOne({ entity: () => 'Station', fieldName: 'station_id', deleteRule: 'cascade', ref: true })
   stationId!: string;
 
   @Property({ type: 'datetime' })

@@ -30,7 +30,7 @@ export class PasswordResetService {
       `SELECT u.id::text, u.email, up.display_name
        FROM iam.users u
        LEFT JOIN iam.user_profiles up ON up.user_id = u.id
-       WHERE u.email = $1 AND u.status = 'active'
+       WHERE u.email = ? AND u.status = 'active'
        LIMIT 1`,
       [email],
     )) as UserRow[] | { rows: UserRow[] };
@@ -50,7 +50,7 @@ export class PasswordResetService {
 
     await this.em.getConnection().execute(
       `INSERT INTO iam.password_reset_tokens (user_id, token_hash, expires_at)
-       VALUES ($1, $2, $3)`,
+       VALUES (?, ?, ?)`,
       [user.id, tokenHash, expiresAt],
     );
 
@@ -96,7 +96,7 @@ export class PasswordResetService {
     const result = (await this.em.getConnection().execute(
       `SELECT id::text, user_id::text, expires_at, used_at
        FROM iam.password_reset_tokens
-       WHERE token_hash = $1
+       WHERE token_hash = ?
        LIMIT 1`,
       [tokenHash],
     )) as
@@ -112,15 +112,15 @@ export class PasswordResetService {
     await this.em.transactional(async (em) => {
       await em.getConnection().execute(
         `UPDATE iam.users
-         SET password_hash = crypt($2, gen_salt('bf')),
+         SET password_hash = crypt(?, gen_salt('bf')),
              updated_at = now()
-         WHERE id = $1`,
-        [row.user_id, newPassword],
+         WHERE id = ?`,
+        [newPassword, row.user_id],
       );
       await em.getConnection().execute(
         `UPDATE iam.password_reset_tokens
          SET used_at = now()
-         WHERE id = $1`,
+         WHERE id = ?`,
         [row.id],
       );
     });

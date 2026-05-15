@@ -18,7 +18,7 @@ export class ModelRegistry {
   @ManyToOne({
     entity: () => 'Station',
     fieldName: 'station_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     nullable: true,
     ref: true,
   })
@@ -27,7 +27,7 @@ export class ModelRegistry {
   @ManyToOne({
     entity: () => 'Area',
     fieldName: 'area_id',
-    onDelete: 'CASCADE',
+    deleteRule: 'cascade',
     nullable: true,
     ref: true,
   })

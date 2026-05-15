@@ -14,20 +14,7 @@ export class AlertsController {
     const claims = requireAuth(authHeader);
     const limit = Math.min(parseInt(limitStr ?? "50", 10), 200);
 
-    const rows = await this.em.getConnection().execute<{
-      id: string;
-      rule_id: string;
-      station_id: string | null;
-      station_name: string | null;
-      metric: string;
-      threshold: number;
-      actual_value: number;
-      aqi_category: string | null;
-      title: string;
-      message: string;
-      is_read: boolean;
-      created_at: string;
-    }>(
+    const rows: any = await this.em.getConnection().execute(
       `SELECT
          a.id, a.rule_id, a.station_id,
          s.name AS station_name,
@@ -35,23 +22,24 @@ export class AlertsController {
          a.title, a.message, a.is_read, a.created_at
        FROM app.alerts a
        LEFT JOIN catalog.stations s ON s.id = a.station_id
-       WHERE a.user_id = $1
+       WHERE a.user_id = ?
        ORDER BY a.created_at DESC
-       LIMIT $2`,
+       LIMIT ?`,
       [claims.sub, limit],
     );
 
-    return rows.rows ?? [];
+    return Array.isArray(rows) ? rows : (rows.rows ?? []);
   }
 
   @Get("unread-count")
   async unreadCount(@Headers("authorization") authHeader?: string) {
     const claims = requireAuth(authHeader);
-    const row = await this.em.getConnection().execute<{ count: string }>(
-      `SELECT COUNT(*)::TEXT AS count FROM app.alerts WHERE user_id = $1 AND is_read = FALSE`,
+    const row: any = await this.em.getConnection().execute(
+      `SELECT COUNT(*)::TEXT AS count FROM app.alerts WHERE user_id = ? AND is_read = FALSE`,
       [claims.sub],
     );
-    return { count: parseInt(row.rows?.[0]?.count ?? "0", 10) };
+    const r = row.rows ? row.rows[0] : row[0];
+    return { count: parseInt(r?.count ?? "0", 10) };
   }
 
   @Patch(":id/read")
@@ -61,7 +49,7 @@ export class AlertsController {
   ) {
     const claims = requireAuth(authHeader);
     await this.em.getConnection().execute(
-      `UPDATE app.alerts SET is_read = TRUE WHERE id = $1 AND user_id = $2`,
+      `UPDATE app.alerts SET is_read = TRUE WHERE id = ? AND user_id = ?`,
       [id, claims.sub],
     );
     return { success: true };
@@ -71,7 +59,7 @@ export class AlertsController {
   async markAllRead(@Headers("authorization") authHeader?: string) {
     const claims = requireAuth(authHeader);
     await this.em.getConnection().execute(
-      `UPDATE app.alerts SET is_read = TRUE WHERE user_id = $1 AND is_read = FALSE`,
+      `UPDATE app.alerts SET is_read = TRUE WHERE user_id = ? AND is_read = FALSE`,
       [claims.sub],
     );
     return { success: true };
@@ -85,18 +73,7 @@ export class AlertsController {
     requireAuth(authHeader);
     const limit = Math.min(parseInt(limitStr ?? "100", 10), 500);
 
-    const rows = await this.em.getConnection().execute<{
-      id: string;
-      alert_id: string;
-      channel: string;
-      status: string;
-      error_message: string | null;
-      sent_at: string | null;
-      created_at: string;
-      user_email: string | null;
-      station_name: string | null;
-      alert_title: string;
-    }>(
+    const rows: any = await this.em.getConnection().execute(
       `SELECT
          d.id, d.alert_id, d.channel, d.status, d.error_message, d.sent_at, d.created_at,
          u.email AS user_email,
@@ -107,10 +84,10 @@ export class AlertsController {
        LEFT JOIN iam.users u ON u.id = a.user_id
        LEFT JOIN catalog.stations s ON s.id = a.station_id
        ORDER BY d.created_at DESC
-       LIMIT $1`,
+       LIMIT ?`,
       [limit],
     );
 
-    return rows.rows ?? [];
+    return Array.isArray(rows) ? rows : (rows.rows ?? []);
   }
 }
