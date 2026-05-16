@@ -82,4 +82,12 @@ export class IngestScheduler implements OnModuleInit {
     if (!isEnabled()) return;
     await this.runProvider("WAQI", () => this.ingest.runWaqi("scheduled"));
   }
+
+  // OpenAQ: mỗi 6 giờ, phút 50 (free tier, ~60 rpm; chỉ chạy khi có OPENAQ_API_KEY)
+  @Cron(process.env.INGEST_OPENAQ_CRON ?? "50 */6 * * *")
+  async cronOpenaq() {
+    if (!isEnabled()) return;
+    if (!process.env.OPENAQ_API_KEY) return;
+    await this.runProvider("OpenAQ", () => this.ingest.runOpenaq("scheduled"));
+  }
 }

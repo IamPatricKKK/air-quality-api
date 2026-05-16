@@ -67,6 +67,19 @@ import {
   normalizeOpenweatherWeather,
 } from "./openweather";
 import {
+  OPENAQ_PROVIDER_CODE,
+  OPENAQ_PROVIDER_NAME,
+  OPENAQ_PROVIDER_CATEGORY,
+  OPENAQ_PROVIDER_BASE_URL,
+  OPENAQ_ENDPOINT_CODE,
+  OPENAQ_PARSER_KEY,
+  buildOpenaqNearestLocationUrl,
+  buildOpenaqLatestUrl,
+  fetchOpenaq,
+  normalizeOpenaqAq,
+  parseNearestLocationId,
+} from "./openaq";
+import {
   SourceProvider,
   SourceEndpoint,
   StationSourceBinding,
@@ -100,6 +113,7 @@ export interface MultiSyncResult {
   waqi: SyncResult | null;
   iqair: SyncResult | null;
   openweather: SyncResult | null;
+  openaq: SyncResult | null;
   total_aq_points: number;
   total_weather_points: number;
   total_errors: string[];
@@ -591,6 +605,138 @@ export class IngestService {
     }
   }
 
+  // ---------- OpenAQ provider setup ----------
+
+  async ensureOpenaqProviderAndEndpoint() {
+    await this.em.getConnection().execute(
+      `INSERT INTO ingest.source_providers (code, name, category, base_url, is_active, config)
+       VALUES (?,?,?,?,TRUE,?::jsonb)
+       ON CONFLICT (code) DO NOTHING`,
+      [OPENAQ_PROVIDER_CODE, OPENAQ_PROVIDER_NAME, OPENAQ_PROVIDER_CATEGORY, OPENAQ_PROVIDER_BASE_URL,
+       JSON.stringify({ requires_token: true, rate_limit_rpm: 60, free_tier: true, priority: "reference" })],
+    );
+
+    const provider = await this.em.findOne(SourceProvider, { code: OPENAQ_PROVIDER_CODE });
+    if (!provider) throw new Error("Failed to ensure OpenAQ provider");
+    const providerId = provider.id;
+
+    await this.em.getConnection().execute(
+      `INSERT INTO ingest.source_endpoints
+         (provider_id, code, name, kind, http_method, path, parser_key, is_active, config)
+       VALUES (?,?,?,'air_quality','GET',?,?,TRUE,'{}'::jsonb)
+       ON CONFLICT (code) DO UPDATE
+       SET name = EXCLUDED.name, parser_key = EXCLUDED.parser_key, is_active = TRUE`,
+      [providerId, OPENAQ_ENDPOINT_CODE, "OpenAQ Location Latest (government stations)",
+       "/v3/locations/{id}/latest", OPENAQ_PARSER_KEY],
+    );
+
+    const endpoint = await this.em.findOne(SourceEndpoint, { code: OPENAQ_ENDPOINT_CODE });
+    if (!endpoint) throw new Error("Failed to ensure OpenAQ endpoint");
+    return { providerId, endpointId: endpoint.id };
+  }
+
+  // ---------- OpenAQ ingest ----------
+
+  async runOpenaq(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
+    const apiKey = process.env.OPENAQ_API_KEY;
+    if (!apiKey) {
+      this.logger.warn("OPENAQ_API_KEY not set — skipping OpenAQ ingest");
+      return { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: ["OPENAQ_API_KEY not configured"] };
+    }
+
+    const started = Date.now();
+    const errors: string[] = [];
+    let stations: StationRow[] = [];
+    let aqCount = 0;
+    let pipelineRunId = "";
+
+    try {
+      const setup = await this.em.transactional(async (em) => {
+        const { providerId, endpointId } = await this.ensureOpenaqProviderAndEndpoint();
+        const stationsResult = await em.find(Station, { isActive: true }, { orderBy: { code: "ASC" } });
+        stations = stationsResult.map(s => ({
+          id: s.id, code: s.code, lat: s.lat, lng: s.lng, timezone: s.timezone,
+        }));
+        for (const s of stations) {
+          await em.getConnection().execute(
+            `INSERT INTO ingest.station_source_bindings
+               (station_id, endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
+             VALUES (?,?,'',TRUE,150,now(),'{}'::jsonb)
+             ON CONFLICT (station_id, endpoint_id) DO NOTHING`,
+            [s.id, endpointId],
+          );
+        }
+        const runId = await this.createPipelineRun(providerId, endpointId, triggerType, OPENAQ_PROVIDER_CODE);
+        return { providerId, endpointId, runId };
+      });
+      if (!setup) throw new Error("Database not configured");
+      pipelineRunId = setup.runId;
+      const { providerId, endpointId, runId } = setup;
+
+      for (let i = 0; i < stations.length; i++) {
+        const s = stations[i];
+        try {
+          // Bước 1: tìm OpenAQ location gần nhất trong bán kính.
+          const locUrl = buildOpenaqNearestLocationUrl(s.lat, s.lng);
+          const locRes = await fetchOpenaq(locUrl, apiKey);
+          const locId = locRes.ok ? parseNearestLocationId(locRes.payload) : null;
+          if (locId === null) {
+            // Không có trạm OpenAQ gần → bỏ qua station này (không phải lỗi).
+            if (i < stations.length - 1) await new Promise(r => setTimeout(r, 150));
+            continue;
+          }
+
+          // Bước 2: lấy measurements mới nhất của location đó.
+          const latestUrl = buildOpenaqLatestUrl(locId);
+          const res = await fetchOpenaq(latestUrl, apiKey);
+
+          const count = await this.em.transactional(async (em) => {
+            const outId = await this.recordOutbound(
+              runId, providerId, endpointId, latestUrl, res.status, res.latency_ms, res.ok,
+            );
+            if (!res.ok) throw new Error(`OpenAQ HTTP ${res.status}`);
+            const rawId = await this.storeRawPayload(runId, outId, providerId, endpointId, s.id, res.payload);
+            const normId = await this.createNormalizeRun(runId, rawId);
+            const points = normalizeOpenaqAq(res.payload);
+            const inserted = await this.insertAqObservations(
+              s, providerId, endpointId, runId, rawId, normId, points,
+            );
+            await this.finalizeNormalizeRun(normId, inserted);
+            return inserted;
+          });
+          aqCount += count ?? 0;
+
+          if (i < stations.length - 1) await new Promise(r => setTimeout(r, 150));
+        } catch (e: any) {
+          errors.push(`[${s.code}][openaq] ${e?.message ?? e}`);
+          this.logger.warn(`OpenAQ failed for ${s.code}: ${e?.message}`);
+        }
+      }
+
+      const status: "success" | "partial" | "failed" =
+        errors.length === 0 ? "success" : aqCount > 0 ? "partial" : "failed";
+      await this.em.transactional(async (em) => {
+        await this.finalizePipelineRun(pipelineRunId, status, {
+          stations: stations.length,
+          aq_points: aqCount,
+          weather_points: 0,
+          errors_count: errors.length,
+          duration_ms: Date.now() - started,
+        }, errors.length ? errors.slice(0, 5).join("; ") : undefined);
+      });
+
+      return { pipeline_run_id: pipelineRunId, stations: stations.length, aq_points: aqCount, weather_points: 0, errors };
+    } catch (e: any) {
+      this.logger.error(`OpenAQ ingest failed: ${e?.message}`);
+      if (pipelineRunId) {
+        await this.em.transactional(async (em) => {
+          await this.finalizePipelineRun(pipelineRunId, "failed", {}, String(e?.message ?? e));
+        });
+      }
+      throw e;
+    }
+  }
+
   // ---------- IQAir provider setup ----------
 
   async ensureIqairProviderAndEndpoint() {
@@ -987,11 +1133,23 @@ export class IngestService {
         }
       }
 
+      // 5) OpenAQ (optional — government/reference stations)
+      let openaqResult: SyncResult | null = null;
+      if (process.env.OPENAQ_API_KEY) {
+        try {
+          openaqResult = await this.runOpenaq(triggerType);
+        } catch (e: any) {
+          this.logger.error(`OpenAQ ingest error: ${e?.message}`);
+          openaqResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
+        }
+      }
+
       const totalAq =
         (iqairResult?.aq_points ?? 0) +
         (owmResult?.aq_points ?? 0) +
         (omResult?.aq_points ?? 0) +
-        (waqiResult?.aq_points ?? 0);
+        (waqiResult?.aq_points ?? 0) +
+        (openaqResult?.aq_points ?? 0);
       const totalWeather =
         (iqairResult?.weather_points ?? 0) +
         (owmResult?.weather_points ?? 0) +
@@ -1001,6 +1159,7 @@ export class IngestService {
         ...(owmResult?.errors ?? []),
         ...(omResult?.errors ?? []),
         ...(waqiResult?.errors ?? []),
+        ...(openaqResult?.errors ?? []),
       ];
 
       this.logger.log(
@@ -1008,7 +1167,8 @@ export class IngestService {
           `IQAir=${iqairResult?.aq_points ?? 0}aq+${iqairResult?.weather_points ?? 0}w, ` +
           `OpenWeather=${owmResult?.aq_points ?? 0}aq+${owmResult?.weather_points ?? 0}w, ` +
           `OpenMeteo=${omResult?.aq_points ?? 0}aq+${omResult?.weather_points ?? 0}w, ` +
-          `WAQI=${waqiResult?.aq_points ?? 0}aq, errors=${totalErrors.length}`,
+          `WAQI=${waqiResult?.aq_points ?? 0}aq, ` +
+          `OpenAQ=${openaqResult?.aq_points ?? 0}aq, errors=${totalErrors.length}`,
       );
 
       return {
@@ -1016,6 +1176,7 @@ export class IngestService {
         waqi: waqiResult,
         iqair: iqairResult,
         openweather: owmResult,
+        openaq: openaqResult,
         total_aq_points: totalAq,
         total_weather_points: totalWeather,
         total_errors: totalErrors,

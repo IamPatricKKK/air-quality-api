@@ -63,6 +63,20 @@ export class IngestController {
     }
   }
 
+  @Post("run/openaq")
+  async triggerOpenaq(@Headers("authorization") authHeader?: string) {
+    requireAuth(authHeader, ADMIN_ROLES);
+    if (this.ingest.isRunning()) {
+      throw new HttpException("Ingest already running", 409);
+    }
+    try {
+      const result = await this.ingest.runOpenaq("manual");
+      return { ok: true, ...result };
+    } catch (e: any) {
+      throw new HttpException(e?.message ?? "Ingest failed", 500);
+    }
+  }
+
   @Get("source-compare")
   async sourceCompare(
     @Headers("authorization") authHeader?: string,
