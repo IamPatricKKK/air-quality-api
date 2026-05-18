@@ -9,6 +9,7 @@ import mikroOrmConfig from './mikro-orm.config';
 import { HealthController } from './health/health.controller';
 import { AuthModule } from './auth/auth.module';
 import { StationsController } from './stations/stations.controller';
+import { WardsController } from './wards/wards.controller';
 import { AdminController } from './admin/admin.controller';
 import { UsersController } from './users/users.controller';
 import { NotificationsController } from './notifications/notifications.controller';
@@ -37,6 +38,7 @@ import { RealtimeModule } from './realtime/realtime.module';
   controllers: [
     HealthController,
     StationsController,
+    WardsController,
     AdminController,
     UsersController,
     NotificationsController,
