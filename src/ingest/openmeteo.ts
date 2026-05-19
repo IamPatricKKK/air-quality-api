@@ -148,6 +148,16 @@ function num(arr: any, i: number): number | null {
   return typeof v === "number" && !Number.isNaN(v) ? v : null;
 }
 
+// Open-Meteo trả cả giờ DỰ BÁO (tương lai). Quan trắc chỉ được tính tới
+// giờ hiện tại — nếu lưu giờ forecast, observed_at > now() sẽ làm méo cửa
+// sổ "tươi" của fusion (loại nhầm dữ liệu trạm thật WAQI). Cho phép trễ
+// +1h để dung sai ranh giới giờ/lệch đồng hồ.
+const FUTURE_TOLERANCE_MS = 60 * 60 * 1000;
+
+function isFuture(isoTime: string): boolean {
+  return new Date(isoTime + "Z").getTime() > Date.now() + FUTURE_TOLERANCE_MS;
+}
+
 export function normalizeAq(payload: any): AqPoint[] {
   const h = payload?.hourly ?? {};
   const times: string[] = h.time ?? [];
@@ -155,6 +165,7 @@ export function normalizeAq(payload: any): AqPoint[] {
   for (let i = 0; i < times.length; i++) {
     const aqi = num(h.us_aqi, i);
     if (aqi === null) continue; // bỏ điểm không có AQI
+    if (isFuture(times[i])) continue; // bỏ giờ dự báo (tương lai)
     out.push({
       observed_at: new Date(times[i] + "Z").toISOString(),
       aqi: Math.round(aqi),
@@ -181,6 +192,7 @@ export function normalizeWeather(payload: any): WeatherPoint[] {
   for (let i = 0; i < times.length; i++) {
     const t = num(h.temperature_2m, i);
     if (t === null) continue;
+    if (isFuture(times[i])) continue; // bỏ giờ dự báo (tương lai)
     const vis = num(h.visibility, i);
     out.push({
       observed_at: new Date(times[i] + "Z").toISOString(),

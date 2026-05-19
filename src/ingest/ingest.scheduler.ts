@@ -23,6 +23,9 @@ export class IngestScheduler implements OnModuleInit {
   }
 
   private async startupIngest() {
+    // Discover real WAQI stations first so the very first ingest already
+    // covers them (no waiting a full day for the discovery cron).
+    await this.runDiscovery("startup");
     try {
       const r = await this.ingest.runAll("scheduled");
       this.logger.log(
@@ -55,6 +58,24 @@ export class IngestScheduler implements OnModuleInit {
     }
   }
 
+  private async runDiscovery(trigger: string) {
+    try {
+      const d = await this.ingest.discoverWaqiStations();
+      this.logger.log(
+        `WAQI discovery (${trigger}): found=${d.found}, upserted=${d.upserted}, errors=${d.errors.length}`,
+      );
+    } catch (e: any) {
+      this.logger.warn(`WAQI discovery (${trigger}) skipped: ${e?.message}`);
+    }
+  }
+
+  // WAQI station discovery: mỗi ngày 03:30 (mạng trạm thay đổi chậm)
+  @Cron(process.env.INGEST_DISCOVERY_CRON ?? "30 3 * * *")
+  async cronDiscovery() {
+    if (!isEnabled()) return;
+    await this.runDiscovery("cron");
+  }
+
   // Open-Meteo: mỗi 1 giờ, phút 0 (free, không giới hạn quota)
   @Cron(process.env.INGEST_OPENMETEO_CRON ?? "0 * * * *")
   async cronOpenMeteo() {
@@ -76,8 +97,8 @@ export class IngestScheduler implements OnModuleInit {
     await this.runProvider("IQAir", () => this.ingest.runIqair("scheduled"));
   }
 
-  // WAQI: mỗi 12 giờ, phút 45
-  @Cron(process.env.INGEST_WAQI_CRON ?? "45 */12 * * *")
+  // WAQI: mỗi 3 giờ, phút 45 (trạm thật — cần tươi hơn cho fusion)
+  @Cron(process.env.INGEST_WAQI_CRON ?? "45 */3 * * *")
   async cronWaqi() {
     if (!isEnabled()) return;
     await this.runProvider("WAQI", () => this.ingest.runWaqi("scheduled"));

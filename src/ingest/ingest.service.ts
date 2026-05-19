@@ -33,8 +33,11 @@ import {
   WAQI_ENDPOINT_CODE,
   WAQI_PARSER_KEY,
   buildWaqiFeedUrl,
+  buildWaqiBoundsUrl,
   fetchWaqi,
   normalizeWaqiAq,
+  normalizeWaqiStations,
+  isInsideVietnam,
 } from "./waqi";
 import {
   IQAIR_PROVIDER_CODE,
@@ -497,6 +500,99 @@ export class IngestService {
     return { providerId, endpointId: endpoint.id };
   }
 
+  // ---------- WAQI station auto-discovery ----------
+
+  /**
+   * Discover every real WAQI station inside the Vietnam bounding box and
+   * upsert them into catalog.stations. Existing per-coordinate ingest then
+   * automatically starts pulling data for the new stations (no extra wiring).
+   *
+   * Idempotent: keyed by station code `WAQI-<uid>`; re-running only refreshes
+   * name/coords. Manually-seeded stations (other codes) are never touched.
+   */
+  async discoverWaqiStations(): Promise<{ found: number; raw: number; upserted: number; deactivated: number; errors: string[] }> {
+    const waqiToken = process.env.WAQI_TOKEN;
+    if (!waqiToken) {
+      return { found: 0, raw: 0, upserted: 0, deactivated: 0, errors: ["WAQI_TOKEN not configured"] };
+    }
+    // Vietnam mainland bounding box (lat S→N, lng W→E). Kept tight to limit
+    // catching cross-border stations (southern China / Laos / Cambodia).
+    const url = buildWaqiBoundsUrl(8.0, 102.0, 23.4, 109.6, waqiToken);
+    const res = await fetchWaqi(url, 20000);
+    if (!res.ok) {
+      return { found: 0, raw: 0, upserted: 0, deactivated: 0, errors: [`WAQI bounds HTTP ${res.status}: ${res.payload?.data ?? "unknown"}`] };
+    }
+
+    const allStations = normalizeWaqiStations(res.payload);
+    // Keep Vietnam-only: the bbox also covers China/Laos/Cambodia border areas.
+    const stations = allStations.filter((s) => isInsideVietnam(s.lat, s.lng));
+    if (stations.length === 0) {
+      return { found: 0, raw: 0, upserted: 0, deactivated: 0, errors: [] };
+    }
+
+    const runStartedAt = new Date();
+    let upserted = 0;
+    const errors: string[] = [];
+    for (const st of stations) {
+      try {
+        await this.em.getConnection().execute(
+          `
+            INSERT INTO catalog.stations
+              (code, name, lat, lng, station_type, is_active, metadata)
+            VALUES (?, ?, ?, ?, 'monitoring', TRUE,
+                    jsonb_build_object('source', 'waqi', 'waqi_uid', ?::int))
+            ON CONFLICT (code) DO UPDATE SET
+              name       = EXCLUDED.name,
+              lat        = EXCLUDED.lat,
+              lng        = EXCLUDED.lng,
+              is_active  = TRUE,
+              metadata   = catalog.stations.metadata || EXCLUDED.metadata,
+              updated_at = now()
+          `,
+          [`WAQI-${st.uid}`, st.name, st.lat, st.lng, st.uid],
+        );
+        upserted += 1;
+      } catch (e: any) {
+        errors.push(`WAQI-${st.uid}: ${e?.message ?? e}`);
+      }
+    }
+
+    // Sync: deactivate previously-discovered WAQI stations that are no longer
+    // in the current VN result set (e.g. stale cross-border stations from an
+    // earlier wider box, or stations WAQI dropped). Seed/manual stations
+    // (metadata.source <> 'waqi') are never touched.
+    // Every current station got updated_at >= runStartedAt via the upsert
+    // above. WAQI stations whose updated_at is older were not in this result
+    // set → deactivate. Avoids binding an array param to the driver.
+    let deactivated = 0;
+    if (upserted > 0) {
+      try {
+        const res2 = await this.em.getConnection().execute<{ n: string }>(
+          `
+            WITH upd AS (
+              UPDATE catalog.stations
+                 SET is_active = FALSE, updated_at = now()
+               WHERE metadata->>'source' = 'waqi'
+                 AND is_active = TRUE
+                 AND updated_at < ?
+              RETURNING 1
+            )
+            SELECT count(*)::text AS n FROM upd
+          `,
+          [runStartedAt],
+        );
+        deactivated = Number(res2?.[0]?.n ?? 0);
+      } catch (e: any) {
+        errors.push(`deactivate-stale: ${e?.message ?? e}`);
+      }
+    }
+
+    this.logger.log(
+      `WAQI discovery: raw=${allStations.length}, inVN=${stations.length}, upserted=${upserted}, deactivated=${deactivated}, errors=${errors.length}`,
+    );
+    return { found: stations.length, raw: allStations.length, upserted, deactivated, errors };
+  }
+
   // ---------- WAQI ingest ----------
 
   async runWaqi(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
@@ -516,12 +612,18 @@ export class IngestService {
       // Setup provider, endpoint, stations, and bindings in transaction
       const setup = await this.em.transactional(async (em) => {
         const { providerId, endpointId } = await this.ensureWaqiProviderAndEndpoint();
-        const stationsResult = await em.find(
-          Station,
-          { isActive: true },
-          { orderBy: { code: "ASC" } },
-        );
-        stations = stationsResult.map(s => ({
+        // Ingest WAQI cho trạm active VÀ mọi trạm do WAQI discovery tạo
+        // (metadata.source='waqi') — kể cả khi bị churn is_active=false —
+        // để không bỏ sót các trạm thật phát hiện được.
+        const stationsResult = (await em.getConnection().execute(
+          `SELECT id, code, lat, lng, timezone
+             FROM catalog.stations
+            WHERE is_active = TRUE OR metadata->>'source' = 'waqi'
+            ORDER BY code ASC`,
+        )) as Array<{
+          id: string; code: string; lat: number; lng: number; timezone: string | null;
+        }>;
+        stations = (stationsResult ?? []).map((s) => ({
           id: s.id,
           code: s.code,
           lat: s.lat,
@@ -553,7 +655,13 @@ export class IngestService {
         try {
           const url = buildWaqiFeedUrl(s.lat, s.lng, waqiToken);
           const safeUrl = url.replace(/token=[^&]+/, "token=***");
-          const res = await fetchWaqi(url);
+          // Timeout 25s + 1 retry: aqicn đôi khi chậm/chập chờn ("aborted"
+          // /"fetch failed"), nhất là khi chạy chung trong runAll lúc startup.
+          let res = await fetchWaqi(url, 25000);
+          if (!res.ok) {
+            await new Promise((r) => setTimeout(r, 800));
+            res = await fetchWaqi(url, 25000);
+          }
 
           const count = await this.em.transactional(async (em) => {
             const outId = await this.recordOutbound(
