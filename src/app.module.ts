@@ -18,6 +18,7 @@ import { IngestModule } from './ingest/ingest.module';
 import { AlertsModule } from './alerts/alerts.module';
 import { PushModule } from './push/push.module';
 import { RealtimeModule } from './realtime/realtime.module';
+import { AdminNotificationsModule } from './admin-notifications/admin-notifications.module';
 
 @Module({
   imports: [
@@ -34,6 +35,7 @@ import { RealtimeModule } from './realtime/realtime.module';
     IngestModule,
     PushModule,
     AlertsModule,
+    AdminNotificationsModule,
   ],
   controllers: [
     HealthController,

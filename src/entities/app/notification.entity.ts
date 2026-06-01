@@ -29,8 +29,14 @@ export class Notification {
   @Property({ type: 'text', default: 'pending' })
   status: string = 'pending';
 
+  @Property({ type: 'boolean', default: false })
+  isRead: boolean = false;
+
   @Property({ type: 'jsonb', default: '{}' })
   sourceContext: Record<string, any> = {};
+
+  @Property({ type: 'uuid', nullable: true })
+  alertId?: string;
 
   @Property({ type: 'timestamptz', defaultRaw: 'now()' })
   createdAt: Date = new Date();
