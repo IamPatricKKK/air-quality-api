@@ -9,6 +9,10 @@ services:
     container_name: airquality-postgres
     restart: unless-stopped
     env_file: .env
+    # Chỉ mở trên localhost của VPS (127.0.0.1) — KHÔNG ra Internet.
+    # Truy cập bằng DBeaver qua SSH tunnel tới VPS rồi localhost:5432.
+    ports:
+      - "127.0.0.1:5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
