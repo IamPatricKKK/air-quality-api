@@ -1,0 +1,56 @@
+name: Deploy Infra (Production)
+
+# Dựng hạ tầng dùng chung (mạng airquality_prod + postgres + caddy). Chạy 1 lần
+# (hoặc khi đổi Caddyfile/infra). Caddy tự cấp HTTPS Let's Encrypt.
+
+on:
+  workflow_dispatch:
+
+env:
+  DEPLOY_PATH: /opt/airquality/infra
+  SSH_OPTS: -o StrictHostKeyChecking=no -o ConnectTimeout=15
+
+jobs:
+  deploy-infra:
+    runs-on: ubuntu-latest
+    environment: production
+    concurrency:
+      group: deploy-infra-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+      - name: Add VPS to known_hosts
+        run: ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: GHCR login on VPS
+        run: |
+          ssh ${{ env.SSH_OPTS }} ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "echo '${{ secrets.GHCR_PAT }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin"
+
+      - name: Create shared network + upload infra files
+        run: |
+          ssh ${{ env.SSH_OPTS }} ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "docker network inspect airquality_prod >/dev/null 2>&1 || docker network create airquality_prod"
+          ssh ${{ env.SSH_OPTS }} ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "mkdir -p ${{ env.DEPLOY_PATH }}"
+          scp ${{ env.SSH_OPTS }} deploy/infra/docker-compose.yml \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ env.DEPLOY_PATH }}/docker-compose.yml
+          scp ${{ env.SSH_OPTS }} deploy/infra/Caddyfile \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ env.DEPLOY_PATH }}/Caddyfile
+
+      - name: Write .env and deploy infra
+        run: |
+          cat > infra.env <<'ENVEOF'
+          POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+          ENVEOF
+          scp ${{ env.SSH_OPTS }} infra.env \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ env.DEPLOY_PATH }}/.env
+          rm -f infra.env
+          ssh ${{ env.SSH_OPTS }} ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "cd ${{ env.DEPLOY_PATH }} && docker compose pull && docker compose up -d"

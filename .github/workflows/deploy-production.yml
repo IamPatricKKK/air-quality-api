@@ -1,0 +1,107 @@
+name: Deploy Production
+
+# Bấm nút deploy: build image API → đẩy GHCR → SSH vào VPS → ghi .env từ
+# Secrets → docker compose pull + up. Secrets lấy từ Environment "production".
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref to deploy"
+        required: true
+        default: main
+        type: string
+
+env:
+  IMAGE: ghcr.io/iampatrickkk/air-quality-api:production
+  DEPLOY_PATH: /opt/airquality/api
+  SSH_OPTS: -o StrictHostKeyChecking=no -o ConnectTimeout=15
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: deploy-api-production
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_PAT }}
+
+      - name: Build & push image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.VPS_SSH_KEY }}
+      - name: Add VPS to known_hosts
+        run: ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: GHCR login on VPS
+        run: |
+          ssh ${{ env.SSH_OPTS }} ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "echo '${{ secrets.GHCR_PAT }}' | docker login ghcr.io -u ${{ github.actor }} --password-stdin"
+
+      - name: Upload compose
+        run: |
+          ssh ${{ env.SSH_OPTS }} ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} "mkdir -p ${{ env.DEPLOY_PATH }}"
+          scp ${{ env.SSH_OPTS }} docker-compose.production.yml \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ env.DEPLOY_PATH }}/docker-compose.yml
+
+      - name: Write .env and deploy
+        run: |
+          cat > prod.env <<'ENVEOF'
+          IMAGE=ghcr.io/iampatrickkk/air-quality-api:production
+          PORT=3002
+          POSTGRES_USER=${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB=${{ secrets.POSTGRES_DB }}
+          DATABASE_URL=postgresql://${{ secrets.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@postgres:5432/${{ secrets.POSTGRES_DB }}
+          JWT_ISSUER=air-quality-api
+          JWT_AUDIENCE=air-quality-clients
+          JWT_ACCESS_TTL_SECONDS=28800
+          JWT_SECRET=${{ secrets.JWT_SECRET }}
+          JWT_PUBLIC_KEY=${{ secrets.JWT_PUBLIC_KEY }}
+          JWT_PRIVATE_KEY=${{ secrets.JWT_PRIVATE_KEY }}
+          FRONTEND_URL=https://airquality.info.vn
+          CORS_ORIGINS=https://airquality.info.vn,https://admin.airquality.info.vn
+          GOOGLE_CLIENT_ID=${{ secrets.GOOGLE_CLIENT_ID }}
+          SMTP_HOST=${{ secrets.SMTP_HOST }}
+          SMTP_PORT=${{ secrets.SMTP_PORT }}
+          SMTP_USER=${{ secrets.SMTP_USER }}
+          SMTP_PASS=${{ secrets.SMTP_PASS }}
+          SMTP_FROM=${{ secrets.SMTP_FROM }}
+          VAPID_PUBLIC_KEY=${{ secrets.VAPID_PUBLIC_KEY }}
+          VAPID_PRIVATE_KEY=${{ secrets.VAPID_PRIVATE_KEY }}
+          VAPID_SUBJECT=mailto:admin@airquality.info.vn
+          WAQI_TOKEN=${{ secrets.WAQI_TOKEN }}
+          IQAIR_API_KEY=${{ secrets.IQAIR_API_KEY }}
+          OPENWEATHER_API_KEY=${{ secrets.OPENWEATHER_API_KEY }}
+          INGEST_ENABLED=true
+          INGEST_CRON=0 */12 * * *
+          ALERT_CRON=*/30 * * * *
+          ADMIN_DIGEST_CRON=0 8 * * *
+          ENVEOF
+          scp ${{ env.SSH_OPTS }} prod.env \
+            ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ env.DEPLOY_PATH }}/.env
+          rm -f prod.env
+          ssh ${{ env.SSH_OPTS }} ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "cd ${{ env.DEPLOY_PATH }} && docker compose pull && docker compose up -d && docker image prune -f"

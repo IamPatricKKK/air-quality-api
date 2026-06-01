@@ -1,0 +1,48 @@
+# Hạ tầng dùng chung — postgres + caddy.
+# Deploy 1 lần qua workflow "Deploy Infra (Production)".
+# Mọi service app (api/be/fe/admin) join mạng external `airquality_prod`
+# và được caddy route theo network alias (api, be, fe, admin).
+
+services:
+  postgres:
+    image: ghcr.io/iampatrickkk/postgres:16-alpine
+    container_name: airquality-postgres
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      airquality_prod:
+        aliases: [postgres]
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+  caddy:
+    image: ghcr.io/iampatrickkk/caddy:2-alpine
+    container_name: airquality-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - airquality_prod
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:
+
+networks:
+  airquality_prod:
+    external: true

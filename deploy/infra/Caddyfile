@@ -1,0 +1,22 @@
+# Caddy reverse proxy — tự động HTTPS (Let's Encrypt).
+# Route theo network alias của từng service trên mạng airquality_prod.
+
+{
+	email letruongle325@gmail.com
+}
+
+airquality.info.vn {
+	reverse_proxy fe:80
+}
+
+api.airquality.info.vn {
+	reverse_proxy api:3002
+}
+
+admin.airquality.info.vn {
+	reverse_proxy admin:80
+}
+
+be.airquality.info.vn {
+	reverse_proxy be:8000
+}

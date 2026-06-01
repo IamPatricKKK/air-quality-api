@@ -1,0 +1,22 @@
+# Production compose — chỉ service API. Deploy độc lập qua workflow
+# "Deploy Production". Biến runtime nạp từ .env (workflow ghi từ GitHub Secrets).
+
+services:
+  api:
+    image: ${IMAGE}
+    container_name: airquality-api
+    restart: unless-stopped
+    env_file: .env
+    expose:
+      - "3002"
+    networks:
+      airquality_prod:
+        aliases: [api]
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+networks:
+  airquality_prod:
+    external: true
