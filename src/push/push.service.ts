@@ -51,8 +51,13 @@ export class PushService {
     const subject = process.env.VAPID_SUBJECT ?? "mailto:admin@air-quality.local";
 
     if (publicKey && privateKey) {
-      webpush.setVapidDetails(subject, publicKey, privateKey);
-      this.configured = true;
+      try {
+        webpush.setVapidDetails(subject, publicKey, privateKey);
+        this.configured = true;
+      } catch (err) {
+        // Invalid VAPID keys must not crash the whole API — just disable push.
+        this.logger.warn(`Invalid VAPID keys — push notifications disabled: ${err}`);
+      }
     } else {
       this.logger.warn(
         "VAPID keys not configured — push notifications disabled. Generate with `npx web-push generate-vapid-keys`.",
