@@ -109,10 +109,19 @@ CREATE TABLE iam.users (
   email           CITEXT NOT NULL UNIQUE,
   password_hash   TEXT NOT NULL,
   status          public.user_status_enum NOT NULL DEFAULT 'active',
+  auth_provider   VARCHAR(20) NOT NULL DEFAULT 'local',
+  google_id       VARCHAR(100),
+  facebook_id     VARCHAR(100),
+  avatar_url      VARCHAR(500),
   last_login_at   TIMESTAMPTZ,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE UNIQUE INDEX uq_iam_users_google_id
+  ON iam.users (google_id) WHERE google_id IS NOT NULL;
+CREATE UNIQUE INDEX uq_iam_users_facebook_id
+  ON iam.users (facebook_id) WHERE facebook_id IS NOT NULL;
 
 CREATE TABLE iam.roles (
   id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -826,10 +835,29 @@ SELECT
   se.code AS source_endpoint_code
 FROM catalog.stations s
 LEFT JOIN LATERAL (
-  SELECT *
+  -- Provider priority: prefer real-monitoring-station sources (WAQI, IQAir)
+  -- over model-based ones (OpenWeather, Open-Meteo) — but only when the
+  -- reading is still fresh (<=6h). If nothing is fresh, fall back to the
+  -- newest reading regardless of provider so the station never goes blank.
+  SELECT a.*
   FROM core.air_quality_observations a
+  LEFT JOIN ingest.source_providers spp ON spp.id = a.source_provider_id
   WHERE a.station_id = s.id
-  ORDER BY a.observed_at DESC
+  ORDER BY
+    (a.observed_at >= now() - INTERVAL '6 hours') DESC,
+    (CASE
+       WHEN a.observed_at >= now() - INTERVAL '6 hours' THEN
+         CASE spp.code
+           WHEN 'waqi'           THEN 1
+           WHEN 'iqair'          THEN 2
+           WHEN 'openweathermap' THEN 3
+           WHEN 'openmeteo'      THEN 4
+           WHEN 'openaq'         THEN 5
+           ELSE 9
+         END
+       ELSE 0
+     END) ASC,
+    a.observed_at DESC
   LIMIT 1
 ) aq ON TRUE
 LEFT JOIN LATERAL (
