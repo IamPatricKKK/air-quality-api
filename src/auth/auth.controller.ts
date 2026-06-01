@@ -5,6 +5,9 @@ import { EntityManager } from "@mikro-orm/core";
 import { hasDatabase } from "../db/database";
 import { issueAccessToken, mapClaimsToUser, requireAuth, resolveActingUserId } from "./jwt";
 import { PasswordResetService } from "./password-reset.service";
+import { EmailVerificationService } from "./email-verification.service";
+import { GoogleAuthService } from "./oauth/google.service";
+import { FacebookAuthService } from "./oauth/facebook.service";
 import { User } from "../entities/iam/user.entity";
 import { UserProfile } from "../entities/iam/user-profile.entity";
 import { Role } from "../entities/iam/role.entity";
@@ -15,6 +18,7 @@ interface DbAuthUser {
   email: string;
   displayName: string;
   roles: string[];
+  emailVerifiedAt?: string | null;
 }
 
 function buildAuthResponse(user: {
@@ -45,11 +49,12 @@ function buildAuthResponse(user: {
 
 async function loadUserByEmail(em: EntityManager, email: string, password: string): Promise<DbAuthUser | null> {
   // Use raw SQL for PostgreSQL crypt() function verification
-  const result = await em.getConnection().execute<{ id: string; email: string; display_name?: string; roles?: string[] }>(
+  const result = await em.getConnection().execute<{ id: string; email: string; display_name?: string; roles?: string[]; email_verified_at?: string | null }>(
     `
       SELECT
         u.id::text,
         u.email,
+        u.email_verified_at,
         up.display_name,
         ARRAY_REMOVE(ARRAY_AGG(r.code), NULL) AS roles
       FROM iam.users u
@@ -58,7 +63,7 @@ async function loadUserByEmail(em: EntityManager, email: string, password: strin
       LEFT JOIN iam.roles r ON r.id = ur.role_id
       WHERE u.email = ?
         AND u.password_hash = crypt(?, u.password_hash)
-      GROUP BY u.id, up.display_name
+      GROUP BY u.id, up.display_name, u.email_verified_at
       LIMIT 1
     `,
     [email, password],
@@ -74,6 +79,7 @@ async function loadUserByEmail(em: EntityManager, email: string, password: strin
     email: row.email,
     displayName: row.display_name ?? email.split("@")[0],
     roles: row.roles ?? ["user"],
+    emailVerifiedAt: row.email_verified_at ?? null,
   };
 }
 
@@ -82,6 +88,9 @@ export class AuthController {
   constructor(
     @Inject(EntityManager) private readonly em: EntityManager,
     private readonly passwordReset: PasswordResetService,
+    private readonly emailVerification: EmailVerificationService,
+    private readonly googleAuth: GoogleAuthService,
+    private readonly facebookAuth: FacebookAuthService,
   ) {}
 
   @Post("forgot-password")
@@ -121,13 +130,18 @@ export class AuthController {
 
       const row = await loadUserByEmail(this.em, body.email, body.password);
       if (row) {
-        // Update last login timestamp
-        const user = await this.em.findOne(User, { id: row.id });
-        if (user) {
-          user.lastLoginAt = new Date();
-          user.updatedAt = new Date();
-          await this.em.persistAndFlush(user);
+        if (!row.emailVerifiedAt) {
+          throw new UnauthorizedException({
+            code: "email_not_verified",
+            message: "Vui lòng xác thực email trước khi đăng nhập.",
+          });
         }
+
+        // Update last login timestamp (raw SQL to avoid Collection init issues)
+        await this.em.getConnection().execute(
+          `UPDATE iam.users SET last_login_at = now() WHERE id = ?::uuid`,
+          [row.id],
+        );
 
         return buildAuthResponse(row);
       }
@@ -228,7 +242,22 @@ export class AuthController {
     });
 
     if (createdUser) {
-      return buildAuthResponse(createdUser);
+      // Send verification email (no session is returned — user must verify first)
+      try {
+        await this.emailVerification.sendVerification(
+          createdUser.id,
+          createdUser.email,
+          createdUser.displayName,
+        );
+      } catch (err) {
+        // Don't fail registration if SMTP is misconfigured — log and surface
+        // the same response so client can prompt the user to resend later.
+      }
+      return {
+        pending_verification: true,
+        email: createdUser.email,
+        message: "Đăng ký thành công. Vui lòng kiểm tra email để xác thực tài khoản.",
+      };
     }
 
     if (hasDatabase()) {
@@ -241,6 +270,69 @@ export class AuthController {
       displayName: body.displayName ?? body.email.split("@")[0],
       roles: ["user"],
     });
+  }
+
+  @Post("verify-email")
+  @Throttle({ medium: { limit: 10, ttl: 60_000 } })
+  async verifyEmail(@Body() body: { token?: string }) {
+    if (!body?.token) {
+      throw new BadRequestException("Token là bắt buộc");
+    }
+    const ok = await this.emailVerification.confirm(body.token);
+    if (!ok) {
+      throw new BadRequestException("Token không hợp lệ hoặc đã hết hạn");
+    }
+    return { success: true };
+  }
+
+  @Post("resend-verification")
+  @Throttle({ long: { limit: 3, ttl: 60 * 60_000 } })
+  async resendVerification(@Body() body: { email?: string }) {
+    if (!body?.email) {
+      throw new BadRequestException("Email là bắt buộc");
+    }
+    // Always return success to avoid leaking which emails exist or are already verified
+    await this.emailVerification.resend(body.email);
+    return {
+      success: true,
+      message: "Nếu email tồn tại và chưa được xác thực, liên kết mới đã được gửi.",
+    };
+  }
+
+  @Post("google")
+  @Throttle({ medium: { limit: 10, ttl: 60_000 } })
+  async googleLogin(@Body() body: { idToken?: string; accessToken?: string }) {
+    if (!body?.idToken && !body?.accessToken) {
+      throw new BadRequestException("idToken hoặc accessToken là bắt buộc");
+    }
+    const profile = body.idToken
+      ? await this.googleAuth.verifyIdToken(body.idToken)
+      : await this.googleAuth.verifyAccessToken(body.accessToken!);
+    const user = await this.findOrCreateOAuthUser({
+      provider: "google",
+      providerId: profile.googleId,
+      email: profile.email,
+      displayName: profile.name,
+      avatarUrl: profile.picture,
+    });
+    return buildAuthResponse(user);
+  }
+
+  @Post("facebook")
+  @Throttle({ medium: { limit: 10, ttl: 60_000 } })
+  async facebookLogin(@Body() body: { accessToken?: string }) {
+    if (!body?.accessToken) {
+      throw new BadRequestException("accessToken là bắt buộc");
+    }
+    const profile = await this.facebookAuth.verifyAccessToken(body.accessToken);
+    const user = await this.findOrCreateOAuthUser({
+      provider: "facebook",
+      providerId: profile.facebookId,
+      email: profile.email ?? `fb_${profile.facebookId}@facebook.local`,
+      displayName: profile.name,
+      avatarUrl: profile.picture,
+    });
+    return buildAuthResponse(user);
   }
 
   @Get("me")
@@ -297,6 +389,86 @@ export class AuthController {
   @SkipThrottle()
   logout() {
     return { ok: true };
+  }
+
+  private async findOrCreateOAuthUser(params: {
+    provider: "google" | "facebook";
+    providerId: string;
+    email: string;
+    displayName: string;
+    avatarUrl?: string;
+  }): Promise<DbAuthUser> {
+    const { provider, providerId, email, displayName, avatarUrl } = params;
+    const idColumn = provider === "google" ? "googleId" : "facebookId";
+
+    const userId = await this.em.transactional(async (em) => {
+      let user =
+        (await em.findOne(User, { [idColumn]: providerId })) ??
+        (await em.findOne(User, { email }));
+
+      if (user) {
+        // Link the OAuth identity + update last login in one raw SQL statement.
+        // Avoids MikroORM persistAndFlush which can fail on uninitialized Collections.
+        const idCol = provider === "google" ? "google_id" : "facebook_id";
+        await em.getConnection().execute(
+          `UPDATE iam.users
+              SET ${idCol} = ?,
+                  avatar_url = COALESCE(?, avatar_url),
+                  last_login_at = now(),
+                  email_verified_at = COALESCE(email_verified_at, now())
+            WHERE id = ?::uuid`,
+          [providerId, avatarUrl ?? null, user.id],
+        );
+      } else {
+        // OAuth users have no usable password — store a random unguessable hash
+        // so password login is impossible until they use "forgot password".
+        // Email is marked verified because the OAuth provider already vouched for it.
+        const result = await em.getConnection().execute<{ id: string }>(
+          `
+            INSERT INTO iam.users (email, password_hash, status, auth_provider, ${provider === "google" ? "google_id" : "facebook_id"}, avatar_url, email_verified_at)
+            VALUES (?, crypt(?, gen_salt('bf')), 'active', ?, ?, ?, now())
+            ON CONFLICT (email) DO NOTHING
+            RETURNING id
+          `,
+          [email, randomUUID(), provider, providerId, avatarUrl ?? null],
+        );
+
+        if (!result || result.length === 0) {
+          user = await em.findOne(User, { email });
+          if (!user) {
+            throw new UnauthorizedException("Không thể tạo tài khoản");
+          }
+        } else {
+          user = await em.findOne(User, { id: result[0].id });
+          if (!user) {
+            throw new UnauthorizedException("Không thể tạo tài khoản");
+          }
+        }
+      }
+
+      // Ensure profile (display name + avatar).
+      await em.getConnection().execute(
+        `INSERT INTO iam.user_profiles (user_id, display_name, avatar_url)
+         VALUES (?::uuid, ?, ?)
+         ON CONFLICT (user_id) DO UPDATE
+           SET display_name = COALESCE(NULLIF(iam.user_profiles.display_name, ''), EXCLUDED.display_name),
+               avatar_url   = COALESCE(EXCLUDED.avatar_url, iam.user_profiles.avatar_url)`,
+        [user.id, displayName, avatarUrl ?? null],
+      );
+
+      // Ensure default 'user' role.
+      await em.getConnection().execute(
+        `INSERT INTO iam.user_roles (user_id, role_id)
+         SELECT ?::uuid, r.id FROM iam.roles r WHERE r.code = 'user'
+         ON CONFLICT DO NOTHING`,
+        [user.id],
+      );
+
+      return user.id;
+    });
+
+    const row = await this.loadUserById(userId);
+    return row ?? { id: userId, email, displayName, roles: ["user"] };
   }
 
   private async loadUserById(userId: string): Promise<DbAuthUser | null> {

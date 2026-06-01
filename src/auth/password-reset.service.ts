@@ -63,7 +63,7 @@ export class PasswordResetService {
     const html = `
       <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         <div style="background: #1a1a2e; color: #e0e0e0; padding: 24px; border-radius: 12px;">
-          <h2 style="color: #2dd4bf; margin: 0 0 16px;">Dat lai mat khau AirWatch</h2>
+          <h2 style="color: #2dd4bf; margin: 0 0 16px;">Dat lai mat khau CLKKVN</h2>
           <p style="line-height: 1.6;">Xin chao ${displayName},</p>
           <p style="line-height: 1.6;">
             Ban (hoac ai do) da yeu cau dat lai mat khau cho tai khoan ${email}.
@@ -84,7 +84,7 @@ export class PasswordResetService {
 
     await this.emailService.send({
       to: user.email,
-      subject: "[AirWatch] Dat lai mat khau",
+      subject: "[CLKKVN] Dat lai mat khau",
       html,
     });
   }

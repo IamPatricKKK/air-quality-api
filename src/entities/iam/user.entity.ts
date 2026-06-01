@@ -33,6 +33,18 @@ export class User {
   })
   status: UserStatus = UserStatus.ACTIVE;
 
+  @Property({ type: 'string', length: 20, default: 'local' })
+  authProvider = 'local';
+
+  @Property({ type: 'string', length: 100, nullable: true })
+  googleId?: string;
+
+  @Property({ type: 'string', length: 100, nullable: true })
+  facebookId?: string;
+
+  @Property({ type: 'string', length: 500, nullable: true })
+  avatarUrl?: string;
+
   @Property({ type: 'timestamptz', nullable: true })
   lastLoginAt?: Date;
 
