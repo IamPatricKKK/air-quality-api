@@ -5,7 +5,8 @@ dist
 .env
 README.md
 .dockerignore
-db
+db/data
+db/scripts
 npm-debug.log
 yarn-error.log
 *.tsbuildinfo
