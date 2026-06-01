@@ -157,7 +157,7 @@ export class StationsController {
       )
       .join("\n");
 
-    const filename = `airwatch-${station.code}-${limitHours}h.csv`;
+    const filename = `air-quality-${station.code}-${limitHours}h.csv`;
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send("﻿" + header + body);

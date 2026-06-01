@@ -76,8 +76,13 @@ export async function fetchOpenweather(url: string, timeoutMs = 15000) {
     } catch {
       payload = { raw: bodyText };
     }
+    // OpenWeather's /weather endpoint echoes the HTTP status in the body as
+    // `cod: 200` even on success, while /air_pollution omits `cod` entirely.
+    // Treat `cod` as an error signal only when it is not a 2xx value.
+    const codNum = payload?.cod != null ? Number(payload.cod) : null;
+    const codOk = codNum === null || (codNum >= 200 && codNum < 300);
     return {
-      ok: res.ok && payload && !payload.cod && !payload.error,
+      ok: res.ok && payload && codOk && !payload.error,
       status: res.status,
       latency_ms: Date.now() - started,
       payload,

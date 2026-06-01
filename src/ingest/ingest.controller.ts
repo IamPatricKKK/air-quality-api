@@ -21,6 +21,17 @@ export class IngestController {
     }
   }
 
+  @Post("discover/waqi")
+  async discoverWaqi(@Headers("authorization") authHeader?: string) {
+    requireAuth(authHeader, ADMIN_ROLES);
+    try {
+      const result = await this.ingest.discoverWaqiStations();
+      return { ok: true, ...result };
+    } catch (e: any) {
+      throw new HttpException(e?.message ?? "Discovery failed", 500);
+    }
+  }
+
   @Post("run/waqi")
   async triggerWaqi(@Headers("authorization") authHeader?: string) {
     requireAuth(authHeader, ADMIN_ROLES);
