@@ -5,7 +5,18 @@ import { AppModule } from "./app.module";
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
   app.setGlobalPrefix("api/v1");
-  app.enableCors();
+
+  // CORS: restrict to configured origins in production; allow all if unset (dev).
+  // CORS_ORIGINS is a comma-separated list, e.g.
+  //   "https://airquality.info.vn,https://admin.airquality.info.vn"
+  const corsOrigins = (process.env.CORS_ORIGINS ?? "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter(Boolean);
+  app.enableCors({
+    origin: corsOrigins.length > 0 ? corsOrigins : true,
+    credentials: true,
+  });
 
   const config = new DocumentBuilder()
     .setTitle("Air Quality API")

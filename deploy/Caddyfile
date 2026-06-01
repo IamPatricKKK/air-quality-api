@@ -1,0 +1,26 @@
+# Caddy reverse proxy — tự động cấp & gia hạn HTTPS (Let's Encrypt).
+# Đổi email dưới đây thành email thật của bạn (Let's Encrypt dùng để cảnh báo hết hạn).
+
+{
+	email letruongle325@gmail.com
+}
+
+# Web người dùng
+airquality.info.vn {
+	reverse_proxy fe:80
+}
+
+# API NestJS (REST + WebSocket realtime — Caddy tự xử lý WebSocket)
+api.airquality.info.vn {
+	reverse_proxy api:3002
+}
+
+# Trang quản trị
+admin.airquality.info.vn {
+	reverse_proxy admin:80
+}
+
+# Backend phân tích / dự báo (Python FastAPI)
+be.airquality.info.vn {
+	reverse_proxy be:8000
+}
