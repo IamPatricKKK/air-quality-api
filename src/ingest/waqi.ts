@@ -9,6 +9,8 @@
  * WAQI chỉ trả realtime snapshot — mỗi lần fetch = 1 AqPoint.
  */
 
+import { readFileSync } from "fs";
+import { join } from "path";
 import { AqPoint } from "./openmeteo";
 
 export const WAQI_PROVIDER_CODE = "waqi";
@@ -23,6 +25,112 @@ export const WAQI_PARSER_KEY = "waqi.feed.v1";
 
 export function buildWaqiFeedUrl(lat: number, lng: number, token: string): string {
   return `${WAQI_PROVIDER_BASE_URL}/feed/geo:${lat};${lng}/?token=${encodeURIComponent(token)}`;
+}
+
+/**
+ * WAQI "map stations within a bounding box" endpoint. Returns every real
+ * station (government + community) WAQI knows inside the box — this is what
+ * powers the dense aqicn.org map. latlng order = lat1,lng1,lat2,lng2.
+ */
+export function buildWaqiBoundsUrl(
+  latSouth: number,
+  lngWest: number,
+  latNorth: number,
+  lngEast: number,
+  token: string,
+): string {
+  return `${WAQI_PROVIDER_BASE_URL}/map/bounds/?latlng=${latSouth},${lngWest},${latNorth},${lngEast}&token=${encodeURIComponent(token)}`;
+}
+
+// A WAQI bounding box around Vietnam unavoidably also covers Guangxi/Hainan
+// (China), Laos and Cambodia, so discovered stations are point-in-polygon
+// filtered against the real VN province boundaries (same vn-provinces.geojson
+// the grid-coverage feature uses — keeps the two consistent).
+
+type Ring = ReadonlyArray<readonly [number, number]>; // [lng, lat] pairs
+let VN_POLYGONS: { outer: Ring; holes: Ring[] }[] | null = null;
+
+function loadVnPolygons(): { outer: Ring; holes: Ring[] }[] {
+  if (VN_POLYGONS) return VN_POLYGONS;
+  // dist/ingest → ../../data ; src/ingest → ../../data (same layout)
+  const file = join(__dirname, "..", "..", "data", "vn-provinces.geojson");
+  const polys: { outer: Ring; holes: Ring[] }[] = [];
+  try {
+    const gj = JSON.parse(readFileSync(file, "utf-8"));
+    for (const f of gj.features ?? []) {
+      const g = f.geometry;
+      if (!g) continue;
+      const multi =
+        g.type === "MultiPolygon" ? g.coordinates : g.type === "Polygon" ? [g.coordinates] : [];
+      for (const polygon of multi) {
+        if (!polygon?.length) continue;
+        polys.push({ outer: polygon[0], holes: polygon.slice(1) });
+      }
+    }
+  } catch {
+    // If the boundary file is missing, fail open (keep all) rather than
+    // silently dropping every station.
+  }
+  VN_POLYGONS = polys;
+  return polys;
+}
+
+function pointInRing(lat: number, lng: number, ring: Ring): boolean {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], yi = ring[i][1];
+    const xj = ring[j][0], yj = ring[j][1];
+    const intersect =
+      yi > lat !== yj > lat && lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/** True if (lat,lng) falls inside any Vietnam province polygon (minus holes). */
+export function isInsideVietnam(lat: number, lng: number): boolean {
+  const polys = loadVnPolygons();
+  if (polys.length === 0) return true; // boundary unavailable → don't over-filter
+  for (const { outer, holes } of polys) {
+    if (!pointInRing(lat, lng, outer)) continue;
+    if (holes.some((h) => pointInRing(lat, lng, h))) continue;
+    return true;
+  }
+  return false;
+}
+
+export interface WaqiDiscoveredStation {
+  uid: number;
+  lat: number;
+  lng: number;
+  name: string;
+  aqi: number | null;
+}
+
+/**
+ * Parse the /map/bounds payload into a clean station list. Drops rows with
+ * no usable coordinates. AQI is "-" when the station is temporarily offline.
+ */
+export function normalizeWaqiStations(payload: any): WaqiDiscoveredStation[] {
+  const rows = Array.isArray(payload?.data) ? payload.data : [];
+  const out: WaqiDiscoveredStation[] = [];
+  for (const r of rows) {
+    const uid = Number(r?.uid);
+    const lat = Number(r?.lat);
+    const lng = Number(r?.lon);
+    if (!Number.isFinite(uid) || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+      continue;
+    }
+    const aqiNum = Number(r?.aqi);
+    out.push({
+      uid,
+      lat,
+      lng,
+      name: (typeof r?.station?.name === "string" && r.station.name.trim()) || `WAQI #${uid}`,
+      aqi: Number.isFinite(aqiNum) ? aqiNum : null,
+    });
+  }
+  return out;
 }
 
 // ---------- Fetcher ----------

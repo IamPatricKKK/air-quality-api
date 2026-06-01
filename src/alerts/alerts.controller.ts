@@ -1,10 +1,26 @@
-import { Controller, Get, Patch, Param, Headers, Query } from "@nestjs/common";
+import { Controller, Get, Post, Patch, Param, Headers, Query } from "@nestjs/common";
 import { EntityManager } from "@mikro-orm/postgresql";
 import { requireAuth } from "../auth/jwt";
+import { AlertEvaluatorService } from "./alert-evaluator.service";
 
 @Controller("alerts")
 export class AlertsController {
-  constructor(private readonly em: EntityManager) {}
+  constructor(
+    private readonly em: EntityManager,
+    private readonly evaluator: AlertEvaluatorService,
+  ) {}
+
+  /**
+   * Trigger an immediate evaluation of all active alert rules (instead of
+   * waiting for the every-30-minutes scheduler). Useful for testing/demoing
+   * the email/push/in-app delivery pipeline. Requires authentication.
+   */
+  @Post("evaluate")
+  async evaluateNow(@Headers("authorization") authHeader?: string) {
+    requireAuth(authHeader);
+    const count = await this.evaluator.evaluate();
+    return { success: true, alertsCreated: count };
+  }
 
   @Get()
   async list(

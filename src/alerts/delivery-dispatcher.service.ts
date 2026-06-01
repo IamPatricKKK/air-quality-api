@@ -3,7 +3,7 @@ import { EntityManager } from "@mikro-orm/postgresql";
 import { EmailService } from "./email.service";
 import { PushService } from "../push/push.service";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
-import { Notification, User } from "../entities";
+import { User } from "../entities";
 
 interface AlertForDispatch {
   id: string;
@@ -39,7 +39,26 @@ export class DeliveryDispatcher {
       category: alert.aqi_category,
     });
 
-    for (const channel of alert.channels) {
+    // Defensive: Postgres enum[] read via raw SQL can arrive as the string
+    // "{email,in_app}" instead of an array. Iterating a string would yield
+    // single characters, so coerce to a real array first.
+    let channels: string[] = Array.isArray(alert.channels)
+      ? alert.channels
+      : String(alert.channels ?? "")
+          .replace(/^\{|\}$/g, "")
+          .split(",")
+          .map((c) => c.trim())
+          .filter(Boolean);
+
+    // User alert emails go to regular users only. Admins receive a separate
+    // daily system digest, so skip the email channel for their own rules to
+    // avoid duplicate/noisy mail. In-app & push still apply.
+    if (channels.includes("email") && (await this.isAdminUser(alert.user_id))) {
+      channels = channels.filter((c) => c !== "email");
+      this.logger.log(`Skipped alert email for admin user ${alert.user_id}`);
+    }
+
+    for (const channel of channels) {
       const deliveryId = await this.createDelivery(alert.id, channel);
       if (!deliveryId) continue;
 
@@ -63,6 +82,19 @@ export class DeliveryDispatcher {
         await this.markDelivery(deliveryId, "failed", String(err));
       }
     }
+  }
+
+  private async isAdminUser(userId: string): Promise<boolean> {
+    const rows: any = await this.em.getConnection().execute(
+      `SELECT 1
+         FROM iam.user_roles ur
+         JOIN iam.roles r ON r.id = ur.role_id
+        WHERE ur.user_id = ?::uuid AND r.code IN ('admin', 'super_admin')
+        LIMIT 1`,
+      [userId],
+    );
+    const list = Array.isArray(rows) ? rows : (rows.rows ?? []);
+    return list.length > 0;
   }
 
   private async deliverPush(alert: AlertForDispatch): Promise<void> {
@@ -99,15 +131,11 @@ export class DeliveryDispatcher {
   }
 
   private async deliverInApp(alert: AlertForDispatch): Promise<void> {
-    const notification = this.em.create(Notification, {
-      user: { id: alert.user_id } as any,
-      title: alert.title,
-      body: alert.message,
-      station: alert.station_id ? { id: alert.station_id } as any : null,
-      category: "alert",
-      status: "pending",
-    });
-    await this.em.persistAndFlush(notification);
+    await this.em.getConnection().execute(
+      `INSERT INTO app.notifications (user_id, title, body, station_id, alert_id, category, status)
+       VALUES (?, ?, ?, ?, ?, 'alert', 'pending')`,
+      [alert.user_id, alert.title, alert.message, alert.station_id ?? null, alert.id],
+    );
   }
 
   private async deliverEmail(alert: AlertForDispatch): Promise<void> {
@@ -141,7 +169,7 @@ export class DeliveryDispatcher {
           </table>
           <hr style="border: none; border-top: 1px solid #374151; margin: 16px 0;" />
           <p style="font-size: 12px; color: #6b7280; margin: 0;">
-            AirWatch Vietnam — He thong giam sat chat luong khong khi thoi gian thuc
+            Chất Lượng Không Khí Việt Nam — He thong giam sat chat luong khong khi thoi gian thuc
           </p>
         </div>
       </div>
@@ -149,7 +177,7 @@ export class DeliveryDispatcher {
 
     await this.emailService.send({
       to: user.email,
-      subject: `[AirWatch] ${alert.title}`,
+      subject: `[CLKKVN] ${alert.title}`,
       html,
     });
   }
