@@ -1,20 +1,22 @@
 # Production stack — Chất Lượng Không Khí Việt Nam
 #
-# Layout expected on the server (all 4 repos cloned side-by-side):
-#   /opt/airquality/
-#     ├── air-quality-api/   (this repo — contains deploy/)
-#     ├── air-quality-be/
-#     ├── air-quality-fe/
-#     └── air-quality-admin/
+# CI/CD model: GitHub Actions builds every image and pushes to GHCR
+# (ghcr.io/iampatrickkk/air-quality-*). The VPS only PULLS pre-built images —
+# it never builds. This keeps the 2GB VPS light and avoids needing npm/pip/
+# Docker Hub access from the server (only GHCR, which is GitHub infra).
 #
-# Run from inside air-quality-api/deploy/:
-#   docker compose -f docker-compose.prod.yml --env-file .env up -d --build
+# Base images (postgres, caddy) are mirrored to GHCR too, so the VPS pulls
+# EVERYTHING from one registry it can reach.
 #
-# Build contexts are relative to THIS file (air-quality-api/deploy/).
+# Deploy on the server (only needs this file + .env + Caddyfile):
+#   docker login ghcr.io -u IamPatricKKK            # paste a GitHub PAT (read:packages)
+#   docker compose -f docker-compose.prod.yml --env-file .env pull
+#   docker compose -f docker-compose.prod.yml --env-file .env up -d
+#   docker compose -f docker-compose.prod.yml --env-file .env exec api yarn migration:up
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: ghcr.io/iampatrickkk/postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
@@ -22,7 +24,6 @@ services:
       POSTGRES_DB: ${POSTGRES_DB}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-    # No host port published — DB is reachable only inside the docker network.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -31,8 +32,7 @@ services:
     mem_limit: 512m
 
   api:
-    build:
-      context: ..
+    image: ghcr.io/iampatrickkk/air-quality-api:${IMAGE_TAG:-latest}
     restart: unless-stopped
     env_file: .env
     environment:
@@ -46,8 +46,7 @@ services:
     mem_limit: 512m
 
   be:
-    build:
-      context: ../../air-quality-be
+    image: ghcr.io/iampatrickkk/air-quality-be:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
@@ -64,36 +63,22 @@ services:
         condition: service_healthy
     expose:
       - "8000"
-    # Prophet/ML is memory-hungry; cap it so it can't OOM-kill Postgres/API.
     mem_limit: 900m
 
   fe:
-    build:
-      context: ../../air-quality-fe
-      args:
-        VITE_AIR_QUALITY_API_URL: https://api.${DOMAIN}/api/v1
-        VITE_AIR_QUALITY_BE_URL: https://be.${DOMAIN}/api/v1
-        VITE_AIR_QUALITY_ADMIN_URL: https://admin.${DOMAIN}
-        VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID}
-        VITE_VAPID_PUBLIC_KEY: ${VAPID_PUBLIC_KEY}
+    image: ghcr.io/iampatrickkk/air-quality-fe:${IMAGE_TAG:-latest}
     restart: unless-stopped
     expose:
       - "80"
 
   admin:
-    build:
-      context: ../../air-quality-admin
-      args:
-        VITE_AIR_QUALITY_API_URL: https://api.${DOMAIN}/api/v1
-        VITE_AIR_QUALITY_BE_URL: https://be.${DOMAIN}/api/v1
-        VITE_AIR_QUALITY_FE_URL: https://${DOMAIN}
-        VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID}
+    image: ghcr.io/iampatrickkk/air-quality-admin:${IMAGE_TAG:-latest}
     restart: unless-stopped
     expose:
       - "80"
 
   caddy:
-    image: caddy:2-alpine
+    image: ghcr.io/iampatrickkk/caddy:2-alpine
     restart: unless-stopped
     ports:
       - "80:80"

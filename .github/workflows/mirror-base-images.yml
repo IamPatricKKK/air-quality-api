@@ -1,0 +1,31 @@
+name: Mirror base images to GHCR
+
+# The production VPS cannot reach Docker Hub (international routing), so mirror
+# the official base images it needs (postgres, caddy) into GHCR — which the VPS
+# CAN reach. Run manually (workflow_dispatch) whenever the pinned versions change.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    strategy:
+      matrix:
+        image:
+          - { src: "postgres:16-alpine", dst: "postgres:16-alpine" }
+          - { src: "caddy:2-alpine", dst: "caddy:2-alpine" }
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Pull, re-tag, push to GHCR
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          docker pull "${{ matrix.image.src }}"
+          docker tag  "${{ matrix.image.src }}" "ghcr.io/${OWNER}/${{ matrix.image.dst }}"
+          docker push "ghcr.io/${OWNER}/${{ matrix.image.dst }}"
