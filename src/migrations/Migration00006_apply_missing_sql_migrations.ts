@@ -41,7 +41,15 @@ export class Migration00006_apply_missing_sql_migrations extends Migration {
       'db/migrations/019_areas_vn_2025_centroids.sql',
     ];
     for (const f of files) {
-      this.addSql(readFileSync(join(root, f), 'utf-8'));
+      const sql = readFileSync(join(root, f), 'utf-8')
+        // 018/019 wrap their body in explicit BEGIN;/COMMIT;. MikroORM already
+        // runs the whole migration in one transaction (with savepoints), so a
+        // nested COMMIT ends that transaction and the next RELEASE SAVEPOINT
+        // fails with 25P01. Strip standalone transaction-control statements.
+        // (Leaves `DO $$ BEGIN ... END $$` PL/pgSQL blocks untouched — those
+        //  have no trailing semicolon on the BEGIN keyword.)
+        .replace(/^[ \t]*(BEGIN|COMMIT|ROLLBACK|START TRANSACTION)[ \t]*;[ \t]*$/gim, '');
+      this.addSql(sql);
     }
   }
 
