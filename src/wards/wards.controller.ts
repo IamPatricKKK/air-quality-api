@@ -1,5 +1,6 @@
 import { Controller, Get, Query } from "@nestjs/common";
 import { EntityManager } from "@mikro-orm/postgresql";
+import { TtlCache } from "../common/ttl-cache";
 
 /**
  * Danh sách xã/phường (catalog.areas level='ward') kèm AQI ĐÃ PHÂN TÍCH
@@ -29,8 +30,15 @@ type WardRow = {
 export class WardsController {
   constructor(private readonly em: EntityManager) {}
 
+  // Cache 60s, tách theo tham số province (data ward đổi theo cron BE ~3h).
+  private static readonly listCache = new TtlCache<unknown[]>(60_000);
+
   @Get()
   async getWards(@Query("province") province?: string) {
+    const cacheKey = province?.trim() || "__all__";
+    const cached = WardsController.listCache.get(cacheKey);
+    if (cached) return cached;
+
     const params: unknown[] = [];
     let provinceFilter = "";
     if (province && province.trim()) {
@@ -63,7 +71,7 @@ export class WardsController {
       params,
     );
 
-    return (rows ?? []).map((r) => ({
+    const result = (rows ?? []).map((r) => ({
       id: r.ward_id,
       code: r.ward_code,
       name: r.ward_name,
@@ -78,5 +86,7 @@ export class WardsController {
       analyzedAt: r.observed_at,
       source: "idw_stations",
     }));
+    WardsController.listCache.set(cacheKey, result);
+    return result;
   }
 }

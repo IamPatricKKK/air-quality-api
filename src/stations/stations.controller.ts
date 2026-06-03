@@ -2,6 +2,7 @@ import { Controller, Get, NotFoundException, Param, Query, Res } from "@nestjs/c
 import type { Response } from "express";
 import { EntityManager } from "@mikro-orm/postgresql";
 import { Station, Area, AirQualityObservation } from "../entities";
+import { TtlCache } from "../common/ttl-cache";
 
 type LatestRow = {
   station_id: string;
@@ -54,8 +55,15 @@ function mapStation(row: LatestRow) {
 export class StationsController {
   constructor(private readonly em: EntityManager) {}
 
+  // Cache danh sách trạm 60s: data chỉ đổi theo cron ingest (12h), nên mọi
+  // request trong 60s dùng chung 1 lần query thay vì đập DB liên tục.
+  private static readonly listCache = new TtlCache<ReturnType<typeof mapStation>[]>(60_000);
+
   @Get()
   async getStations() {
+    const cached = StationsController.listCache.get("all");
+    if (cached) return cached;
+
     const rows: any = await this.em.getConnection().execute(`
       SELECT
         latest.station_id,
@@ -82,7 +90,9 @@ export class StationsController {
       WHERE latest.observed_at IS NOT NULL
       ORDER BY station_name
     `);
-    return (rows ?? []).map(mapStation);
+    const result = (rows ?? []).map(mapStation);
+    StationsController.listCache.set("all", result);
+    return result;
   }
 
   @Get(":id/history")
