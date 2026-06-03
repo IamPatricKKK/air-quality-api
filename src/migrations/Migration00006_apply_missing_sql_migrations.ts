@@ -48,7 +48,12 @@ export class Migration00006_apply_missing_sql_migrations extends Migration {
         // fails with 25P01. Strip standalone transaction-control statements.
         // (Leaves `DO $$ BEGIN ... END $$` PL/pgSQL blocks untouched — those
         //  have no trailing semicolon on the BEGIN keyword.)
-        .replace(/^[ \t]*(BEGIN|COMMIT|ROLLBACK|START TRANSACTION)[ \t]*;[ \t]*$/gim, '');
+        .replace(/^[ \t]*(BEGIN|COMMIT|ROLLBACK|START TRANSACTION)[ \t]*;[ \t]*$/gim, '')
+        // CREATE TRIGGER is not idempotent. An earlier partial run committed
+        // 014's grid_points trigger, so a re-run would fail with 42710
+        // ("trigger already exists"). PostgreSQL 14+ supports the OR REPLACE
+        // form — use it so the whole migration can be safely re-applied.
+        .replace(/\bCREATE\s+TRIGGER\b/gi, 'CREATE OR REPLACE TRIGGER');
       this.addSql(sql);
     }
   }
