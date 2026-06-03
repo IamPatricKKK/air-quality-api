@@ -24,10 +24,18 @@ import { AdminNotificationsModule } from './admin-notifications/admin-notificati
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
+    // NOTE: every named throttler registered here applies to EVERY route
+    // (AND-combined) unless a route overrides it with @Throttle/@SkipThrottle.
+    // So these are the limits for PUBLIC endpoints (/stations, /wards, ...),
+    // which the website hits on every page load + polling + service-worker.
+    // Keep them generous. The strict anti-brute-force limits live ONLY on the
+    // auth routes via @Throttle({ medium / long: {...} }) overrides — e.g.
+    // login = 5/min, register = 3/hour — so raising the global ceilings here
+    // does NOT weaken auth protection.
     ThrottlerModule.forRoot([
-      { name: 'short', ttl: 60_000, limit: 30 },
-      { name: 'medium', ttl: 60_000, limit: 5 },
-      { name: 'long', ttl: 60 * 60_000, limit: 10 },
+      { name: 'short', ttl: 60_000, limit: 120 }, // ~2 req/s/IP burst
+      { name: 'medium', ttl: 60_000, limit: 120 }, // overridden to 5–10/min on auth routes
+      { name: 'long', ttl: 60 * 60_000, limit: 5000 }, // overridden to 3/hour on auth routes
     ]),
     MikroOrmModule.forRoot(mikroOrmConfig),
     RealtimeModule,
