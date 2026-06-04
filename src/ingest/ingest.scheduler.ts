@@ -23,6 +23,8 @@ export class IngestScheduler implements OnModuleInit {
   }
 
   private async startupIngest() {
+    // Seed all providers into DB so admin can see & configure them
+    await this.ingest.ensureAllProviders();
     // Discover real WAQI stations first so the very first ingest already
     // covers them (no waiting a full day for the discovery cron).
     await this.runDiscovery("startup");
@@ -108,7 +110,6 @@ export class IngestScheduler implements OnModuleInit {
   @Cron(process.env.INGEST_OPENAQ_CRON ?? "50 */6 * * *")
   async cronOpenaq() {
     if (!isEnabled()) return;
-    if (!process.env.OPENAQ_API_KEY) return;
     await this.runProvider("OpenAQ", () => this.ingest.runOpenaq("scheduled"));
   }
 }

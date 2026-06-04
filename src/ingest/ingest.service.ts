@@ -1,6 +1,7 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Inject, forwardRef } from "@nestjs/common";
 import { EntityManager } from "@mikro-orm/postgresql";
 import { RealtimeGateway } from "../realtime/realtime.gateway";
+import { AdminNotificationService } from "../admin-notifications/admin-notification.service";
 import {
   AQ_BASE_URL,
   AQ_ENDPOINT_CODE,
@@ -135,11 +136,54 @@ export class IngestService {
   constructor(
     private readonly em: EntityManager,
     private readonly realtime: RealtimeGateway,
+    @Inject(forwardRef(() => AdminNotificationService))
+    private readonly adminNotifications: AdminNotificationService,
   ) {}
 
   isRunning(provider?: string) {
     if (provider) return this.runningProviders.has(provider);
     return this.runningProviders.size > 0;
+  }
+
+  /** Map provider code → env var name */
+  getEnvKey(providerCode: string): string | undefined {
+    const map: Record<string, string> = {
+      waqi: "WAQI_TOKEN",
+      openaq: "OPENAQ_API_KEY",
+      iqair: "IQAIR_API_KEY",
+      openweather: "OPENWEATHER_API_KEY",
+      openweathermap: "OPENWEATHER_API_KEY",
+      tomorrow: "TOMORROW_API_KEY",
+    };
+    const envVar = map[providerCode];
+    return envVar ? process.env[envVar] || undefined : undefined;
+  }
+
+  /** Read API key from DB config (source_providers.config.api_key), fallback to env var */
+  private async getApiKey(providerCode: string, envVar: string): Promise<string | undefined> {
+    const provider = await this.em.findOne(SourceProvider, { code: providerCode });
+    const dbKey = provider?.config?.api_key;
+    if (dbKey) return String(dbKey);
+    return process.env[envVar] || undefined;
+  }
+
+  /** Seed all providers into DB at startup so admin can see & configure them */
+  async ensureAllProviders() {
+    try {
+      await this.ensureProviderAndEndpoints();   // Open-Meteo
+    } catch (e: any) { this.logger.warn(`ensureProviders OpenMeteo: ${e?.message}`); }
+    try {
+      await this.ensureWaqiProviderAndEndpoint(); // WAQI
+    } catch (e: any) { this.logger.warn(`ensureProviders WAQI: ${e?.message}`); }
+    try {
+      await this.ensureIqairProviderAndEndpoint(); // IQAir
+    } catch (e: any) { this.logger.warn(`ensureProviders IQAir: ${e?.message}`); }
+    try {
+      await this.ensureOpenweatherProviderAndEndpoints(); // OpenWeather
+    } catch (e: any) { this.logger.warn(`ensureProviders OpenWeather: ${e?.message}`); }
+    try {
+      await this.ensureOpenaqProviderAndEndpoint(); // OpenAQ
+    } catch (e: any) { this.logger.warn(`ensureProviders OpenAQ: ${e?.message}`); }
   }
 
   async ensureProviderAndEndpoints() {
@@ -511,7 +555,7 @@ export class IngestService {
    * name/coords. Manually-seeded stations (other codes) are never touched.
    */
   async discoverWaqiStations(): Promise<{ found: number; raw: number; upserted: number; deactivated: number; errors: string[] }> {
-    const waqiToken = process.env.WAQI_TOKEN;
+    const waqiToken = await this.getApiKey("waqi", "WAQI_TOKEN");
     if (!waqiToken) {
       return { found: 0, raw: 0, upserted: 0, deactivated: 0, errors: ["WAQI_TOKEN not configured"] };
     }
@@ -596,7 +640,7 @@ export class IngestService {
   // ---------- WAQI ingest ----------
 
   async runWaqi(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
-    const waqiToken = process.env.WAQI_TOKEN;
+    const waqiToken = await this.getApiKey("waqi", "WAQI_TOKEN");
     if (!waqiToken) {
       this.logger.warn("WAQI_TOKEN not set — skipping WAQI ingest");
       return { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: ["WAQI_TOKEN not configured"] };
@@ -746,7 +790,7 @@ export class IngestService {
   // ---------- OpenAQ ingest ----------
 
   async runOpenaq(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
-    const apiKey = process.env.OPENAQ_API_KEY;
+    const apiKey = await this.getApiKey("openaq", "OPENAQ_API_KEY");
     if (!apiKey) {
       this.logger.warn("OPENAQ_API_KEY not set — skipping OpenAQ ingest");
       return { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: ["OPENAQ_API_KEY not configured"] };
@@ -888,7 +932,7 @@ export class IngestService {
   // ---------- IQAir ingest ----------
 
   async runIqair(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
-    const apiKey = process.env.IQAIR_API_KEY;
+    const apiKey = await this.getApiKey("iqair", "IQAIR_API_KEY");
     if (!apiKey) {
       this.logger.warn("IQAIR_API_KEY not set — skipping IQAir ingest");
       return { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: ["IQAIR_API_KEY not configured"] };
@@ -967,9 +1011,9 @@ export class IngestService {
           aqCount += counts?.aq ?? 0;
           weatherCount += counts?.weather ?? 0;
 
-          // Rate-limit delay (IQAir community: ~5 req/min)
+          // Rate-limit delay (IQAir community: ~5 req/min = 12s between requests)
           if (i < stations.length - 1) {
-            await new Promise((resolve) => setTimeout(resolve, 300));
+            await new Promise((resolve) => setTimeout(resolve, 13000));
           }
         } catch (e: any) {
           errors.push(`[${s.code}][iqair] ${e?.message ?? e}`);
@@ -1065,7 +1109,7 @@ export class IngestService {
   // ---------- OpenWeather ingest ----------
 
   async runOpenweather(triggerType: "scheduled" | "manual" = "manual"): Promise<SyncResult> {
-    const apiKey = process.env.OPENWEATHER_API_KEY;
+    const apiKey = await this.getApiKey("openweathermap", "OPENWEATHER_API_KEY");
     if (!apiKey) {
       this.logger.warn("OPENWEATHER_API_KEY not set — skipping OpenWeather ingest");
       return { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: ["OPENWEATHER_API_KEY not configured"] };
@@ -1199,96 +1243,105 @@ export class IngestService {
   async runAll(triggerType: "scheduled" | "manual" = "manual"): Promise<MultiSyncResult> {
     // Priority order: IQAir (primary) → OpenWeather (secondary) → Open-Meteo → WAQI
 
+    // Each run* method checks for API key (DB config → env fallback) and skips if missing
+
     // 1) IQAir (primary)
     let iqairResult: SyncResult | null = null;
-      if (process.env.IQAIR_API_KEY) {
-        try {
-          iqairResult = await this.runIqair(triggerType);
-        } catch (e: any) {
-          this.logger.error(`IQAir ingest error: ${e?.message}`);
-          iqairResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
-        }
-      }
+    try {
+      iqairResult = await this.runIqair(triggerType);
+    } catch (e: any) {
+      this.logger.error(`IQAir ingest error: ${e?.message}`);
+      iqairResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
+    }
 
-      // 2) OpenWeather (secondary)
-      let owmResult: SyncResult | null = null;
-      if (process.env.OPENWEATHER_API_KEY) {
-        try {
-          owmResult = await this.runOpenweather(triggerType);
-        } catch (e: any) {
-          this.logger.error(`OpenWeather ingest error: ${e?.message}`);
-          owmResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
-        }
-      }
+    // 2) OpenWeather (secondary)
+    let owmResult: SyncResult | null = null;
+    try {
+      owmResult = await this.runOpenweather(triggerType);
+    } catch (e: any) {
+      this.logger.error(`OpenWeather ingest error: ${e?.message}`);
+      owmResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
+    }
 
-      // 3) Open-Meteo (free, no token)
-      let omResult: SyncResult | null = null;
-      try {
-        omResult = await this.runOpenMeteo(triggerType);
-      } catch (e: any) {
-        this.logger.error(`Open-Meteo ingest error: ${e?.message}`);
-        omResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
-      }
+    // 3) Open-Meteo (free, no token)
+    let omResult: SyncResult | null = null;
+    try {
+      omResult = await this.runOpenMeteo(triggerType);
+    } catch (e: any) {
+      this.logger.error(`Open-Meteo ingest error: ${e?.message}`);
+      omResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
+    }
 
-      // 4) WAQI (optional)
-      let waqiResult: SyncResult | null = null;
-      if (process.env.WAQI_TOKEN) {
-        try {
-          waqiResult = await this.runWaqi(triggerType);
-        } catch (e: any) {
-          this.logger.error(`WAQI ingest error: ${e?.message}`);
-          waqiResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
-        }
-      }
+    // 4) WAQI (optional)
+    let waqiResult: SyncResult | null = null;
+    try {
+      waqiResult = await this.runWaqi(triggerType);
+    } catch (e: any) {
+      this.logger.error(`WAQI ingest error: ${e?.message}`);
+      waqiResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
+    }
 
-      // 5) OpenAQ (optional — government/reference stations)
-      let openaqResult: SyncResult | null = null;
-      if (process.env.OPENAQ_API_KEY) {
-        try {
-          openaqResult = await this.runOpenaq(triggerType);
-        } catch (e: any) {
-          this.logger.error(`OpenAQ ingest error: ${e?.message}`);
-          openaqResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
-        }
-      }
+    // 5) OpenAQ (optional — government/reference stations)
+    let openaqResult: SyncResult | null = null;
+    try {
+      openaqResult = await this.runOpenaq(triggerType);
+    } catch (e: any) {
+      this.logger.error(`OpenAQ ingest error: ${e?.message}`);
+      openaqResult = { pipeline_run_id: "", stations: 0, aq_points: 0, weather_points: 0, errors: [e?.message] };
+    }
 
-      const totalAq =
-        (iqairResult?.aq_points ?? 0) +
-        (owmResult?.aq_points ?? 0) +
-        (omResult?.aq_points ?? 0) +
-        (waqiResult?.aq_points ?? 0) +
-        (openaqResult?.aq_points ?? 0);
-      const totalWeather =
-        (iqairResult?.weather_points ?? 0) +
-        (owmResult?.weather_points ?? 0) +
-        (omResult?.weather_points ?? 0);
-      const totalErrors = [
-        ...(iqairResult?.errors ?? []),
-        ...(owmResult?.errors ?? []),
-        ...(omResult?.errors ?? []),
-        ...(waqiResult?.errors ?? []),
-        ...(openaqResult?.errors ?? []),
-      ];
+    const totalAq =
+      (iqairResult?.aq_points ?? 0) +
+      (owmResult?.aq_points ?? 0) +
+      (omResult?.aq_points ?? 0) +
+      (waqiResult?.aq_points ?? 0) +
+      (openaqResult?.aq_points ?? 0);
+    const totalWeather =
+      (iqairResult?.weather_points ?? 0) +
+      (owmResult?.weather_points ?? 0) +
+      (omResult?.weather_points ?? 0);
+    const totalErrors = [
+      ...(iqairResult?.errors ?? []),
+      ...(owmResult?.errors ?? []),
+      ...(omResult?.errors ?? []),
+      ...(waqiResult?.errors ?? []),
+      ...(openaqResult?.errors ?? []),
+    ];
 
-      this.logger.log(
-        `Multi-provider ingest done: ` +
-          `IQAir=${iqairResult?.aq_points ?? 0}aq+${iqairResult?.weather_points ?? 0}w, ` +
-          `OpenWeather=${owmResult?.aq_points ?? 0}aq+${owmResult?.weather_points ?? 0}w, ` +
-          `OpenMeteo=${omResult?.aq_points ?? 0}aq+${omResult?.weather_points ?? 0}w, ` +
-          `WAQI=${waqiResult?.aq_points ?? 0}aq, ` +
-          `OpenAQ=${openaqResult?.aq_points ?? 0}aq, errors=${totalErrors.length}`,
-      );
+    const summary =
+      `IQAir=${iqairResult?.aq_points ?? 0}aq, ` +
+      `OpenWeather=${owmResult?.aq_points ?? 0}aq, ` +
+      `OpenMeteo=${omResult?.aq_points ?? 0}aq, ` +
+      `WAQI=${waqiResult?.aq_points ?? 0}aq, ` +
+      `OpenAQ=${openaqResult?.aq_points ?? 0}aq`;
 
-      return {
-        openmeteo: omResult,
-        waqi: waqiResult,
-        iqair: iqairResult,
-        openweather: owmResult,
-        openaq: openaqResult,
-        total_aq_points: totalAq,
-        total_weather_points: totalWeather,
-        total_errors: totalErrors,
-      };
+    this.logger.log(`Multi-provider ingest done: ${summary}, errors=${totalErrors.length}`);
+
+    // Notify admins in-app
+    try {
+      const title = totalErrors.length > 0
+        ? `Thu thap du lieu: ${totalAq} AQ (${totalErrors.length} loi)`
+        : `Thu thap du lieu hoan tat: ${totalAq} AQ + ${totalWeather} weather`;
+      await this.adminNotifications.createSystemNotification({
+        category: "ingest_result",
+        title,
+        body: summary,
+        sourceContext: { totalAq, totalWeather, errors: totalErrors.slice(0, 5) },
+      });
+    } catch (e: any) {
+      this.logger.warn(`Admin notification failed: ${e?.message}`);
+    }
+
+    return {
+      openmeteo: omResult,
+      waqi: waqiResult,
+      iqair: iqairResult,
+      openweather: owmResult,
+      openaq: openaqResult,
+      total_aq_points: totalAq,
+      total_weather_points: totalWeather,
+      total_errors: totalErrors,
+    };
   }
 
   // ---------- Open-Meteo ingest ----------
@@ -1325,7 +1378,8 @@ export class IngestService {
       pipelineRunId = setup.runId;
       const { providerId, aqEndpointId, weatherEndpointId, runId } = setup;
 
-      for (const s of stations) {
+      for (let i = 0; i < stations.length; i++) {
+        const s = stations[i];
         const tz = s.timezone ?? "UTC";
 
         // Air quality
@@ -1386,6 +1440,11 @@ export class IngestService {
         } catch (e: any) {
           errors.push(`[${s.code}][weather] ${e?.message ?? e}`);
           this.logger.warn(`Weather failed for ${s.code}: ${e?.message}`);
+        }
+
+        // Rate-limit delay: Open-Meteo free tier ~600 req/min
+        if (i < stations.length - 1) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
         }
       }
 

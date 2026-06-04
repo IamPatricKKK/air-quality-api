@@ -1,6 +1,8 @@
 import { Injectable, Logger } from "@nestjs/common";
 import { EntityManager } from "@mikro-orm/postgresql";
 import { EmailService } from "../alerts/email.service";
+import { PushService } from "../push/push.service";
+import { queryRow, queryRows } from "../db/database";
 
 interface DigestData {
   windowHours: number;
@@ -12,6 +14,16 @@ interface DigestData {
   alertsFired: number;
 }
 
+export interface BroadcastInput {
+  title: string;
+  body: string;
+  target: "all" | "region" | "user";
+  targetValue?: string;
+  channels: string[];
+  scheduledAt?: string | null;
+  sentBy: string; // admin user id
+}
+
 @Injectable()
 export class AdminNotificationService {
   private readonly logger = new Logger(AdminNotificationService.name);
@@ -19,9 +31,11 @@ export class AdminNotificationService {
   constructor(
     private readonly em: EntityManager,
     private readonly emailService: EmailService,
+    private readonly pushService: PushService,
   ) {}
 
-  /** Emails of every active admin / super_admin account. */
+  // ─── Admin user helpers ───────────────────────────
+
   async getAdminEmails(): Promise<string[]> {
     const rows = (await this.em.getConnection().execute(
       `SELECT DISTINCT u.email
@@ -34,6 +48,238 @@ export class AdminNotificationService {
     const list = Array.isArray(rows) ? rows : (rows.rows ?? []);
     return list.map((r) => r.email);
   }
+
+  async getAdminUserIds(): Promise<{ id: string; email: string }[]> {
+    const rows = await queryRows<{ id: string; email: string }>(
+      `SELECT DISTINCT u.id, u.email
+         FROM iam.users u
+         JOIN iam.user_roles ur ON ur.user_id = u.id
+         JOIN iam.roles r ON r.id = ur.role_id
+        WHERE r.code IN ('admin', 'super_admin')
+          AND u.status = 'active'`,
+    );
+    return rows ?? [];
+  }
+
+  // ─── Target resolution ────────────────────────────
+
+  private async resolveTargetUsers(target: string, targetValue?: string): Promise<{ id: string; email: string }[]> {
+    let rows: any[];
+    switch (target) {
+      case "all":
+        rows = await queryRows<{ id: string; email: string }>(
+          `SELECT id, email FROM iam.users WHERE status = 'active'`,
+        ) ?? [];
+        break;
+      case "region":
+        rows = await queryRows<{ id: string; email: string }>(
+          `SELECT DISTINCT u.id, u.email
+             FROM iam.users u
+             JOIN app.user_preferences up ON up.user_id = u.id
+            WHERE u.status = 'active'
+              AND $1 = ANY(up.favorite_regions)`,
+          [targetValue],
+        ) ?? [];
+        break;
+      case "user":
+        rows = await queryRows<{ id: string; email: string }>(
+          `SELECT id, email FROM iam.users WHERE id = $1::uuid AND status = 'active'`,
+          [targetValue],
+        ) ?? [];
+        break;
+      default:
+        rows = [];
+    }
+    return rows;
+  }
+
+  // ─── Broadcast ────────────────────────────────────
+
+  async broadcast(input: BroadcastInput): Promise<{ recipientCount: number }> {
+    const users = await this.resolveTargetUsers(input.target, input.targetValue);
+    if (users.length === 0) return { recipientCount: 0 };
+
+    const isScheduled = input.scheduledAt && new Date(input.scheduledAt) > new Date();
+    const status = isScheduled ? "scheduled" : "sent";
+
+    // Insert notification for each user
+    for (const user of users) {
+      try {
+        await this.em.getConnection().execute(
+          `INSERT INTO app.notifications
+            (user_id, title, body, category, status, target_type, target_value, scheduled_at, sent_by, sent_at, source_context)
+           VALUES (?, ?, ?, 'admin_broadcast', ?, ?, ?, ?, ?, ?, '{}'::jsonb)`,
+          [
+            user.id, input.title, input.body, status,
+            input.target, input.targetValue ?? null,
+            isScheduled ? input.scheduledAt : null,
+            input.sentBy,
+            isScheduled ? null : new Date().toISOString(),
+          ],
+        );
+
+        // Dispatch immediately if not scheduled
+        if (!isScheduled) {
+          if (input.channels.includes("push")) {
+            try {
+              await this.pushService.sendToUser(user.id, {
+                title: input.title,
+                body: input.body,
+                category: "admin_broadcast",
+              });
+            } catch (e: any) {
+              this.logger.warn(`Push failed for ${user.email}: ${e?.message}`);
+            }
+          }
+          if (input.channels.includes("email")) {
+            try {
+              await this.emailService.send({
+                to: user.email,
+                subject: input.title,
+                html: `<div style="font-family:Arial;max-width:600px;margin:0 auto;padding:20px;">
+                  <div style="background:#1a1a2e;color:#e0e0e0;padding:24px;border-radius:12px;">
+                    <h2 style="color:#2dd4bf;margin:0 0 12px;">${input.title}</h2>
+                    <p style="margin:0;line-height:1.6;">${input.body}</p>
+                    <hr style="border:none;border-top:1px solid #374151;margin:16px 0;"/>
+                    <p style="font-size:12px;color:#6b7280;margin:0;">Chat Luong Khong Khi Viet Nam</p>
+                  </div>
+                </div>`,
+              });
+            } catch (e: any) {
+              this.logger.warn(`Email failed for ${user.email}: ${e?.message}`);
+            }
+          }
+        }
+      } catch (e: any) {
+        this.logger.warn(`Broadcast to ${user.email} failed: ${e?.message}`);
+      }
+    }
+
+    this.logger.log(`Broadcast "${input.title}" → ${users.length} users (${status})`);
+    return { recipientCount: users.length };
+  }
+
+  // ─── Cancel scheduled ─────────────────────────────
+
+  async cancelScheduled(notificationId: string): Promise<boolean> {
+    const result = await queryRow<{ id: string }>(
+      `UPDATE app.notifications SET status = 'cancelled'
+       WHERE id = $1::uuid AND status = 'scheduled'
+       RETURNING id`,
+      [notificationId],
+    );
+    return !!result;
+  }
+
+  // ─── Admin Inbox ──────────────────────────────────
+
+  async getAdminInbox(adminUserId: string, limit = 50, offset = 0) {
+    return await queryRows<{
+      id: string; title: string; body: string; category: string;
+      isRead: boolean; sourceContext: any; createdAt: string;
+    }>(
+      `SELECT id, title, body, category,
+              is_read AS "isRead",
+              source_context AS "sourceContext",
+              created_at AS "createdAt"
+         FROM app.notifications
+        WHERE user_id = $1::uuid
+          AND category IN ('system_digest', 'ingest_result', 'alert_summary', 'admin_broadcast')
+        ORDER BY created_at DESC
+        LIMIT $2 OFFSET $3`,
+      [adminUserId, limit, offset],
+    ) ?? [];
+  }
+
+  async getAdminInboxUnreadCount(adminUserId: string): Promise<number> {
+    const row = await queryRow<{ count: number }>(
+      `SELECT count(*)::int AS count FROM app.notifications
+       WHERE user_id = $1::uuid
+         AND category IN ('system_digest', 'ingest_result', 'alert_summary', 'admin_broadcast')
+         AND is_read = FALSE`,
+      [adminUserId],
+    );
+    return row?.count ?? 0;
+  }
+
+  async markInboxRead(notificationId: string, adminUserId: string): Promise<boolean> {
+    const row = await queryRow<{ id: string }>(
+      `UPDATE app.notifications SET is_read = TRUE, read_at = now()
+       WHERE id = $1::uuid AND user_id = $2::uuid
+       RETURNING id`,
+      [notificationId, adminUserId],
+    );
+    return !!row;
+  }
+
+  async markAllInboxRead(adminUserId: string): Promise<number> {
+    const rows = await queryRows<{ id: string }>(
+      `UPDATE app.notifications SET is_read = TRUE, read_at = now()
+       WHERE user_id = $1::uuid
+         AND category IN ('system_digest', 'ingest_result', 'alert_summary', 'admin_broadcast')
+         AND is_read = FALSE
+       RETURNING id`,
+      [adminUserId],
+    );
+    return rows?.length ?? 0;
+  }
+
+  // ─── System auto-notifications ────────────────────
+
+  async createSystemNotification(params: {
+    category: string;
+    title: string;
+    body: string;
+    sourceContext?: Record<string, any>;
+  }): Promise<void> {
+    const admins = await this.getAdminUserIds();
+    for (const admin of admins) {
+      try {
+        await this.em.getConnection().execute(
+          `INSERT INTO app.notifications
+            (user_id, title, body, category, status, source_context, sent_at)
+           VALUES (?, ?, ?, ?, 'sent', ?::jsonb, now())`,
+          [admin.id, params.title, params.body, params.category, JSON.stringify(params.sourceContext ?? {})],
+        );
+      } catch (e: any) {
+        this.logger.warn(`System notification to ${admin.email} failed: ${e?.message}`);
+      }
+    }
+  }
+
+  // ─── Daily Report Config ──────────────────────────
+
+  async getDailyConfig(): Promise<{ enabled: boolean; cron: string; userCount: number }> {
+    const row = await queryRow<{ value: any }>(
+      `SELECT value FROM app.system_config WHERE key = 'daily_report'`,
+    );
+    const config = row?.value ?? { enabled: true, cron: "0 6 * * *" };
+
+    const countRow = await queryRow<{ count: number }>(
+      `SELECT count(*)::int AS count FROM app.user_preferences WHERE daily_report_enabled = TRUE`,
+    );
+
+    return {
+      enabled: config.enabled ?? true,
+      cron: config.cron ?? "0 6 * * *",
+      userCount: countRow?.count ?? 0,
+    };
+  }
+
+  async updateDailyConfig(patch: { enabled?: boolean; cron?: string }): Promise<void> {
+    const current = await this.getDailyConfig();
+    const updated = {
+      enabled: patch.enabled ?? current.enabled,
+      cron: patch.cron ?? current.cron,
+    };
+    await queryRow(
+      `INSERT INTO app.system_config (key, value, updated_at) VALUES ('daily_report', $1::jsonb, now())
+       ON CONFLICT (key) DO UPDATE SET value = $1::jsonb, updated_at = now()`,
+      [JSON.stringify(updated)],
+    );
+  }
+
+  // ─── Daily Digest (existing) ──────────────────────
 
   private async gatherDigest(windowHours = 24): Promise<DigestData> {
     const win = `${windowHours} hours`;
@@ -143,7 +389,6 @@ export class AdminNotificationService {
       </div>`;
   }
 
-  /** Build and send the system digest to every admin. Returns recipients count. */
   async sendDailyDigest(windowHours = 24): Promise<number> {
     const admins = await this.getAdminEmails();
     if (admins.length === 0) {

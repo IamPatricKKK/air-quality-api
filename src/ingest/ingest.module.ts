@@ -1,6 +1,7 @@
 import { Module } from "@nestjs/common";
 import { MikroOrmModule } from "@mikro-orm/nestjs";
 import { RealtimeModule } from "../realtime/realtime.module";
+import { AdminNotificationsModule } from "../admin-notifications/admin-notifications.module";
 import { IngestController } from "./ingest.controller";
 import { IngestScheduler } from "./ingest.scheduler";
 import { IngestService } from "./ingest.service";
@@ -21,6 +22,7 @@ import {
 @Module({
   imports: [
     RealtimeModule,
+    AdminNotificationsModule,
     MikroOrmModule.forFeature([
       SourceProvider,
       SourceEndpoint,

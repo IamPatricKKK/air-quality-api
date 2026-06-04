@@ -144,24 +144,35 @@ export class AdminController {
 
     const rows: any = await this.em.getConnection().execute(`
       SELECT
-        id,
-        title,
-        COALESCE(source_context->>'audience', category) AS audience,
-        COALESCE(source_context->>'channel', 'in_app') AS channel,
-        status,
-        created_at
-      FROM app.notifications
-      ORDER BY created_at DESC
+        n.id,
+        n.title,
+        n.body AS message,
+        n.category AS type,
+        n.status,
+        n.is_read,
+        n.created_at,
+        (n.source_context->>'aqi')::int AS aqi_value,
+        jsonb_build_object(
+          'display_name', COALESCE(p.display_name, u.email),
+          'email', u.email
+        ) AS profiles
+      FROM app.notifications n
+      LEFT JOIN iam.users u ON u.id = n.user_id
+      LEFT JOIN iam.user_profiles p ON p.user_id = n.user_id
+      ORDER BY n.created_at DESC
       LIMIT 100
     `);
 
-    return (rows ?? []).map((row) => ({
+    return (rows ?? []).map((row: any) => ({
       id: row.id,
       title: row.title,
-      audience: row.audience ?? "unknown",
-      channel: row.channel ?? "in_app",
+      message: row.message,
+      type: row.type,
       status: row.status,
-      createdAt: row.created_at,
+      is_read: row.is_read,
+      created_at: row.created_at,
+      aqi_value: row.aqi_value,
+      profiles: typeof row.profiles === 'string' ? JSON.parse(row.profiles) : row.profiles,
     }));
   }
 

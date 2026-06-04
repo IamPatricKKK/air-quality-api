@@ -38,6 +38,18 @@ export class Notification {
   @Property({ type: 'uuid', nullable: true })
   alertId?: string;
 
+  @Property({ type: 'text', default: 'individual' })
+  targetType: string = 'individual';
+
+  @Property({ type: 'text', nullable: true })
+  targetValue?: string;
+
+  @Property({ type: 'timestamptz', nullable: true })
+  scheduledAt?: Date;
+
+  @Property({ type: 'uuid', nullable: true })
+  sentBy?: string;
+
   @Property({ type: 'timestamptz', defaultRaw: 'now()' })
   createdAt: Date = new Date();
 

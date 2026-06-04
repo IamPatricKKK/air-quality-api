@@ -88,6 +88,69 @@ export class IngestController {
     }
   }
 
+  @Post("providers/:id/test")
+  async testProvider(
+    @Headers("authorization") authHeader: string | undefined,
+    @Param("id") id: string,
+  ) {
+    requireAuth(authHeader, ADMIN_ROLES);
+    const provider = await queryRow<{ code: string; config: any; base_url: string }>(
+      `SELECT code, config, base_url FROM ingest.source_providers WHERE id = $1::uuid`,
+      [id],
+    );
+    if (!provider) throw new HttpException("Provider not found", 404);
+
+    const code = provider.code;
+    const apiKey = provider.config?.api_key || this.ingest.getEnvKey(code);
+
+    if (!apiKey && code !== "openmeteo") {
+      return { ok: false, error: "API key chưa được cấu hình", latency_ms: 0 };
+    }
+
+    try {
+      const start = Date.now();
+      let testUrl: string;
+      let headers: Record<string, string> = {};
+
+      switch (code) {
+        case "openmeteo":
+          testUrl = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=21&longitude=105&current=us_aqi";
+          break;
+        case "waqi":
+          testUrl = `https://api.waqi.info/feed/here/?token=${apiKey}`;
+          break;
+        case "openaq":
+          testUrl = "https://api.openaq.org/v3/locations?limit=1";
+          headers = { "X-API-Key": apiKey! };
+          break;
+        case "iqair":
+          testUrl = `https://api.airvisual.com/v2/nearest_city?lat=21&lon=105&key=${apiKey}`;
+          break;
+        case "openweather":
+        case "openweathermap":
+          testUrl = `https://api.openweathermap.org/data/2.5/air_pollution?lat=21&lon=105&appid=${apiKey}`;
+          break;
+        case "tomorrow":
+          testUrl = `https://api.tomorrow.io/v4/weather/realtime?location=21,105&apikey=${apiKey}`;
+          break;
+        default:
+          return { ok: false, error: `Chưa hỗ trợ test cho provider '${code}'`, latency_ms: 0 };
+      }
+
+      const res = await fetch(testUrl, { headers, signal: AbortSignal.timeout(10000) });
+      const latency = Date.now() - start;
+
+      if (res.ok) {
+        return { ok: true, status: res.status, latency_ms: latency };
+      } else {
+        const body = await res.text().catch(() => "");
+        return { ok: false, status: res.status, error: body.slice(0, 200), latency_ms: latency };
+      }
+    } catch (e: any) {
+      return { ok: false, error: e?.message ?? "Connection failed", latency_ms: 0 };
+    }
+  }
+
   @Get("source-compare")
   async sourceCompare(
     @Headers("authorization") authHeader?: string,
@@ -120,8 +183,8 @@ export class IngestController {
        FROM core.air_quality_observations o
        JOIN ingest.source_providers sp ON sp.id = o.source_provider_id
        JOIN catalog.stations s ON s.id = o.station_id
-       WHERE o.observed_at >= now() - (? || ' hours')::interval
-         ${stationId ? "AND o.station_id = ?" : ""}
+       WHERE o.observed_at >= now() - ($1 * interval '1 hour')
+         ${stationId ? "AND o.station_id = $2" : ""}
        ORDER BY o.station_id, hour DESC, sp.code
        LIMIT 500`,
       stationId ? [h, stationId] : [h],
@@ -142,10 +205,11 @@ export class IngestController {
          sp.name,
          sp.category,
          sp.base_url                            AS "baseUrl",
-         NULL::text                             AS "authType",
-         NULL::int                              AS "rateLimitPerMinute",
-         NULL::int                              AS "timeoutSeconds",
+         sp.auth_type                           AS "authType",
+         sp.rate_limit_per_minute               AS "rateLimitPerMinute",
+         sp.timeout_seconds                     AS "timeoutSeconds",
          sp.is_active                           AS "isActive",
+         sp.config,
          COALESCE(last_payload.fetched_at,
                   last_run.finished_at,
                   last_run.started_at,
@@ -171,6 +235,14 @@ export class IngestController {
        ) last_payload ON TRUE
        ORDER BY sp.code`,
     );
+    // Mask api_key but expose hasApiKey flag
+    for (const row of rows ?? []) {
+      const key = row.config?.api_key;
+      row.hasApiKey = Boolean(key);
+      if (key) {
+        row.config = { ...row.config, api_key: "••••" + String(key).slice(-4) };
+      }
+    }
     return rows ?? [];
   }
 
@@ -187,29 +259,35 @@ export class IngestController {
     },
   ) {
     requireAuth(authHeader, ADMIN_ROLES);
+    const configJson = body.config ? JSON.stringify(body.config) : null;
     const row = await queryRow<Record<string, any>>(
       `UPDATE ingest.source_providers
        SET
-         is_active = COALESCE(?, is_active),
-         config = CASE WHEN ?::jsonb IS NULL THEN config ELSE config || ?::jsonb END,
+         is_active = COALESCE($1, is_active),
+         config = CASE WHEN $2::jsonb IS NULL THEN config ELSE config || $2::jsonb END,
          updated_at = now()
-       WHERE id = ?::uuid
+       WHERE id = $3::uuid
        RETURNING
          id::text                     AS "id",
          code,
          name,
          category,
          base_url                     AS "baseUrl",
-         NULL::text                   AS "authType",
-         NULL::int                    AS "rateLimitPerMinute",
-         NULL::int                    AS "timeoutSeconds",
+         auth_type                    AS "authType",
+         rate_limit_per_minute        AS "rateLimitPerMinute",
+         timeout_seconds              AS "timeoutSeconds",
          is_active                    AS "isActive",
+         config,
          updated_at                   AS "lastFetchedAt",
          updated_at                   AS "lastRunAt",
          NULL::text                   AS "lastRunStatus"`,
-      [id, body.isActive, body.config ? JSON.stringify(body.config) : null],
+      [body.isActive ?? null, configJson, id],
     );
     if (!row) throw new HttpException("Provider not found", 404);
+    // Mask api_key in response
+    if (row.config?.api_key) {
+      row.config = { ...row.config, api_key: "••••" + String(row.config.api_key).slice(-4) };
+    }
     return row;
   }
 
@@ -251,15 +329,16 @@ export class IngestController {
     },
   ) {
     requireAuth(authHeader, ADMIN_ROLES);
+    const configJson = body.config ? JSON.stringify(body.config) : null;
     const row = await queryRow<Record<string, any>>(
       `UPDATE ingest.source_endpoints
        SET
-         is_active = COALESCE(?, is_active),
-         schedule_expression = COALESCE(?, schedule_expression),
-         parser_key = COALESCE(?, parser_key),
-         config = CASE WHEN ?::jsonb IS NULL THEN config ELSE config || ?::jsonb END,
+         is_active = COALESCE($1, is_active),
+         schedule_expression = COALESCE($2, schedule_expression),
+         parser_key = COALESCE($3, parser_key),
+         config = CASE WHEN $4::jsonb IS NULL THEN config ELSE config || $4::jsonb END,
          updated_at = now()
-       WHERE id = ?::uuid
+       WHERE id = $5::uuid
        RETURNING
          id::text                         AS "id",
          (SELECT code FROM ingest.source_providers WHERE id = provider_id) AS "providerCode",
@@ -273,11 +352,11 @@ export class IngestController {
          is_active                        AS "isActive",
          updated_at                       AS "updatedAt"`,
       [
+        body.isActive ?? null,
+        body.scheduleExpression ?? null,
+        body.parserKey ?? null,
+        configJson,
         id,
-        body.isActive,
-        body.scheduleExpression,
-        body.parserKey,
-        body.config ? JSON.stringify(body.config) : null,
       ],
     );
     if (!row) throw new HttpException("Endpoint not found", 404);
@@ -324,15 +403,16 @@ export class IngestController {
     },
   ) {
     requireAuth(authHeader, ADMIN_ROLES);
+    const configJson = body.config ? JSON.stringify(body.config) : null;
     const row = await queryRow<Record<string, any>>(
       `UPDATE ingest.station_source_bindings ssb
        SET
-         is_enabled = COALESCE(?, is_enabled),
-         priority   = COALESCE(?, priority),
-         valid_to   = COALESCE(?::timestamptz, valid_to),
-         config     = CASE WHEN ?::jsonb IS NULL THEN config ELSE config || ?::jsonb END,
+         is_enabled = COALESCE($1, is_enabled),
+         priority   = COALESCE($2, priority),
+         valid_to   = COALESCE($3::timestamptz, valid_to),
+         config     = CASE WHEN $4::jsonb IS NULL THEN config ELSE config || $4::jsonb END,
          updated_at = now()
-       WHERE ssb.id = ?::uuid
+       WHERE ssb.id = $5::uuid
        RETURNING
          ssb.id::text                                                        AS "id",
          (SELECT s.id::text FROM catalog.stations s WHERE s.id = ssb.station_id) AS "stationId",
@@ -346,11 +426,11 @@ export class IngestController {
          ssb.valid_to                                                        AS "validTo",
          ssb.updated_at                                                      AS "updatedAt"`,
       [
+        body.isEnabled ?? null,
+        body.priority ?? null,
+        body.validTo ?? null,
+        configJson,
         id,
-        body.isEnabled,
-        body.priority,
-        body.validTo,
-        body.config ? JSON.stringify(body.config) : null,
       ],
     );
     if (!row) throw new HttpException("Source binding not found", 404);
