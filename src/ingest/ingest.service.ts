@@ -216,9 +216,9 @@ export class IngestService {
       for (const endpointId of [aqEndpointId, weatherEndpointId]) {
         await this.em.getConnection().execute(
           `INSERT INTO ingest.station_source_bindings
-            (station_id, source_provider_id, source_endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
-          SELECT ?, se.provider_id, se.id, '', TRUE, 100, now(), '{}'::jsonb FROM ingest.source_endpoints se WHERE se.id = ?
-          ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
+            (station_id, endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
+          SELECT ?, se.id, '', TRUE, 100, now(), '{}'::jsonb FROM ingest.source_endpoints se WHERE se.id = ?
+          ON CONFLICT (station_id, endpoint_id) DO NOTHING`,
           [s.id, endpointId],
         );
       }
@@ -635,9 +635,9 @@ export class IngestService {
         for (const s of stations) {
           await em.getConnection().execute(
             `INSERT INTO ingest.station_source_bindings
-               (station_id, source_provider_id, source_endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
-             SELECT ?, se.provider_id, se.id, '', TRUE, 200, now(), '{}'::jsonb FROM ingest.source_endpoints se WHERE se.id = ?
-             ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
+               (station_id, endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
+             SELECT ?, se.id, '', TRUE, 200, now(), '{}'::jsonb FROM ingest.source_endpoints se WHERE se.id = ?
+             ON CONFLICT (station_id, endpoint_id) DO NOTHING`,
             [s.id, endpointId],
           );
         }
@@ -768,9 +768,9 @@ export class IngestService {
         for (const s of stations) {
           await em.getConnection().execute(
             `INSERT INTO ingest.station_source_bindings
-               (station_id, source_provider_id, source_endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
-             SELECT ?, se.provider_id, se.id, '', TRUE, 150, now(), '{}'::jsonb FROM ingest.source_endpoints se WHERE se.id = ?
-             ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
+               (station_id, endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
+             SELECT ?, se.id, '', TRUE, 150, now(), '{}'::jsonb FROM ingest.source_endpoints se WHERE se.id = ?
+             ON CONFLICT (station_id, endpoint_id) DO NOTHING`,
             [s.id, endpointId],
           );
         }
@@ -921,9 +921,9 @@ export class IngestService {
         for (const s of stations) {
           await em.getConnection().execute(
             `INSERT INTO ingest.station_source_bindings
-               (station_id, source_provider_id, source_endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
-             SELECT ?, se.provider_id, se.id, '', TRUE, 50, now(), '{}'::jsonb FROM ingest.source_endpoints se WHERE se.id = ?
-             ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
+               (station_id, endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
+             SELECT ?, se.id, '', TRUE, 50, now(), '{}'::jsonb FROM ingest.source_endpoints se WHERE se.id = ?
+             ON CONFLICT (station_id, endpoint_id) DO NOTHING`,
             [s.id, endpointId],
           );
         }
@@ -1100,9 +1100,9 @@ export class IngestService {
           for (const endpointId of [airEndpointId, weatherEndpointId]) {
             await em.getConnection().execute(
               `INSERT INTO ingest.station_source_bindings
-                 (station_id, source_provider_id, source_endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
-               SELECT ?, se.provider_id, se.id, '', TRUE, 150, now(), '{}'::jsonb FROM ingest.source_endpoints se WHERE se.id = ?
-               ON CONFLICT (station_id, source_endpoint_id) DO NOTHING`,
+                 (station_id, endpoint_id, external_object_id, is_enabled, priority, valid_from, config)
+               SELECT ?, se.id, '', TRUE, 150, now(), '{}'::jsonb FROM ingest.source_endpoints se WHERE se.id = ?
+               ON CONFLICT (station_id, endpoint_id) DO NOTHING`,
               [s.id, endpointId],
             );
           }
