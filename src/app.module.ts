@@ -19,6 +19,7 @@ import { AlertsModule } from './alerts/alerts.module';
 import { PushModule } from './push/push.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { AdminNotificationsModule } from './admin-notifications/admin-notifications.module';
+import { DailyReportModule } from './daily-report/daily-report.module';
 
 @Module({
   imports: [
@@ -44,6 +45,7 @@ import { AdminNotificationsModule } from './admin-notifications/admin-notificati
     PushModule,
     AlertsModule,
     AdminNotificationsModule,
+    DailyReportModule,
   ],
   controllers: [
     HealthController,
