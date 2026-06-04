@@ -70,7 +70,8 @@ export class PushService {
   }
 
   async saveSubscription(userId: string, input: PushSubscriptionInput): Promise<{ id: string }> {
-    const result = (await this.em.getConnection().execute(
+    // em.getConnection().execute() with default method='all' returns res.rows directly (plain array).
+    const rows = (await this.em.getConnection().execute(
       `INSERT INTO app.push_subscriptions (user_id, endpoint, p256dh, auth, user_agent)
        VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (endpoint) DO UPDATE
@@ -81,8 +82,8 @@ export class PushService {
              last_used_at = now()
        RETURNING id`,
       [userId, input.endpoint, input.keys.p256dh, input.keys.auth, input.userAgent ?? null],
-    )) as { rows?: { id: string }[] };
-    const id = result.rows?.[0]?.id;
+    )) as { id: string }[];
+    const id = rows?.[0]?.id;
     if (!id) throw new Error("Failed to save push subscription");
     return { id };
   }

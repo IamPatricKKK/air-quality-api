@@ -16602,8 +16602,8 @@
           "enumItems": [],
           "mappedType": "uuid"
         },
-        "endpoint_id": {
-          "name": "endpoint_id",
+        "source_endpoint_id": {
+          "name": "source_endpoint_id",
           "type": "uuid",
           "unsigned": false,
           "autoincrement": false,
@@ -16629,7 +16629,7 @@
           "length": null,
           "precision": null,
           "scale": null,
-          "default": null,
+          "default": "''",
           "comment": null,
           "enumItems": [],
           "mappedType": "text"
@@ -16761,6 +16761,22 @@
           "comment": null,
           "enumItems": [],
           "mappedType": "datetime"
+        },
+        "source_provider_id": {
+          "name": "source_provider_id",
+          "type": "uuid",
+          "unsigned": false,
+          "autoincrement": false,
+          "primary": false,
+          "nullable": false,
+          "unique": false,
+          "length": null,
+          "precision": null,
+          "scale": null,
+          "default": null,
+          "comment": null,
+          "enumItems": [],
+          "mappedType": "uuid"
         }
       },
       "name": "station_source_bindings",
@@ -16790,11 +16806,11 @@
         {
           "columnNames": [
             "station_id",
-            "endpoint_id"
+            "source_endpoint_id"
           ],
           "composite": true,
           "constraint": true,
-          "keyName": "station_source_bindings_station_id_endpoint_id_key",
+          "keyName": "station_source_bindings_station_id_source_endpoint_id_key",
           "unique": true,
           "primary": false
         }
@@ -16803,11 +16819,24 @@
       "foreignKeys": {
         "station_source_bindings_endpoint_id_fkey": {
           "columnNames": [
-            "endpoint_id"
+            "source_endpoint_id"
           ],
           "constraintName": "station_source_bindings_endpoint_id_fkey",
           "localTableName": "ingest.station_source_bindings",
           "referencedTableName": "ingest.source_endpoints",
+          "referencedColumnNames": [
+            "id"
+          ],
+          "updateRule": "no action",
+          "deleteRule": "cascade"
+        },
+        "station_source_bindings_source_provider_id_fkey": {
+          "columnNames": [
+            "source_provider_id"
+          ],
+          "constraintName": "station_source_bindings_source_provider_id_fkey",
+          "localTableName": "ingest.station_source_bindings",
+          "referencedTableName": "ingest.source_providers",
           "referencedColumnNames": [
             "id"
           ],

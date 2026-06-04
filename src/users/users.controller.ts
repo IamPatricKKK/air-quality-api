@@ -1,7 +1,9 @@
-import { Body, Controller, Get, Headers, Patch, Query } from "@nestjs/common";
+import { Body, Controller, Get, Headers, Patch, Query, BadRequestException } from "@nestjs/common";
 import { EntityManager } from "@mikro-orm/postgresql";
 import { wrap } from "@mikro-orm/core";
+import * as bcrypt from "bcrypt";
 import { User, UserPreference, UserPinnedStation, Station } from "../entities";
+import { UserProfile } from "../entities/iam/user-profile.entity";
 import { requireAuth, resolveActingUserId } from "../auth/jwt";
 
 interface PreferencesRow {
@@ -96,7 +98,7 @@ export class UsersController {
         ORDER BY up.created_at ASC
         LIMIT 1
       `,
-      [effectiveUserId ?? null],
+      [effectiveUserId ?? null, effectiveUserId ?? null],
     );
 
     const row = rows?.[0];
@@ -225,5 +227,57 @@ export class UsersController {
       ...DEFAULT_PREFERENCES,
       ...payload,
     };
+  }
+
+  /** Update display name */
+  @Patch("profile")
+  async updateProfile(
+    @Headers("authorization") authHeader?: string,
+    @Body() body?: { displayName?: string },
+  ) {
+    const claims = requireAuth(authHeader);
+    const userId = claims.sub;
+    if (!body?.displayName?.trim()) throw new BadRequestException("Tên hiển thị không được trống");
+
+    const user = await this.em.findOneOrFail(User, { id: userId }, { populate: ["profile"] });
+    let profile = user.profile;
+
+    if (!profile) {
+      profile = this.em.create(UserProfile, { user: userId, displayName: body.displayName.trim() });
+      await this.em.persistAndFlush(profile);
+    } else {
+      profile.displayName = body.displayName.trim();
+      await this.em.flush();
+    }
+
+    return { displayName: profile.displayName };
+  }
+
+  /** Change password (current password required) or set password for OAuth users */
+  @Patch("password")
+  async updatePassword(
+    @Headers("authorization") authHeader?: string,
+    @Body() body?: { currentPassword?: string; newPassword?: string },
+  ) {
+    const claims = requireAuth(authHeader);
+    const userId = claims.sub;
+    if (!body?.newPassword || body.newPassword.length < 6) {
+      throw new BadRequestException("Mật khẩu mới phải có ít nhất 6 ký tự");
+    }
+
+    const user = await this.em.findOneOrFail(User, { id: userId });
+    const isOAuth = user.authProvider !== "local";
+
+    // OAuth users setting password for the first time don't need currentPassword
+    if (!isOAuth) {
+      if (!body.currentPassword) throw new BadRequestException("Vui lòng nhập mật khẩu hiện tại");
+      const valid = await bcrypt.compare(body.currentPassword, user.passwordHash);
+      if (!valid) throw new BadRequestException("Mật khẩu hiện tại không đúng");
+    }
+
+    user.passwordHash = await bcrypt.hash(body.newPassword, 10);
+    await this.em.flush();
+
+    return { message: "Đã cập nhật mật khẩu" };
   }
 }
