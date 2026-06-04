@@ -1,9 +1,9 @@
 import { randomUUID } from "crypto";
-import { BadRequestException, Body, Controller, Get, Headers, Post, Query, UnauthorizedException, Inject } from "@nestjs/common";
+import { BadRequestException, Body, Controller, ForbiddenException, Get, Headers, Post, Query, UnauthorizedException, Inject } from "@nestjs/common";
 import { Throttle, SkipThrottle } from "@nestjs/throttler";
 import { EntityManager } from "@mikro-orm/core";
 import { hasDatabase } from "../db/database";
-import { issueAccessToken, mapClaimsToUser, requireAuth, resolveActingUserId } from "./jwt";
+import { ADMIN_ROLES, issueAccessToken, mapClaimsToUser, requireAuth, resolveActingUserId } from "./jwt";
 import { PasswordResetService } from "./password-reset.service";
 import { EmailVerificationService } from "./email-verification.service";
 import { GoogleAuthService } from "./oauth/google.service";
@@ -301,13 +301,25 @@ export class AuthController {
 
   @Post("google")
   @Throttle({ medium: { limit: 10, ttl: 60_000 } })
-  async googleLogin(@Body() body: { idToken?: string; accessToken?: string }) {
+  async googleLogin(@Body() body: { idToken?: string; accessToken?: string; adminOnly?: boolean }) {
     if (!body?.idToken && !body?.accessToken) {
       throw new BadRequestException("idToken hoặc accessToken là bắt buộc");
     }
     const profile = body.idToken
       ? await this.googleAuth.verifyIdToken(body.idToken)
       : await this.googleAuth.verifyAccessToken(body.accessToken!);
+
+    if (body.adminOnly) {
+      const existing = await this.findExistingOAuthUser("google", profile.googleId, profile.email);
+      if (!existing) {
+        throw new UnauthorizedException("Tài khoản chưa được đăng ký. Liên hệ quản trị viên.");
+      }
+      if (!ADMIN_ROLES.some((role) => existing.roles.includes(role))) {
+        throw new ForbiddenException("Tài khoản không có quyền quản trị.");
+      }
+      return buildAuthResponse(existing);
+    }
+
     const user = await this.findOrCreateOAuthUser({
       provider: "google",
       providerId: profile.googleId,
@@ -389,6 +401,26 @@ export class AuthController {
   @SkipThrottle()
   logout() {
     return { ok: true };
+  }
+
+  private async findExistingOAuthUser(
+    provider: "google" | "facebook",
+    providerId: string,
+    email: string,
+  ): Promise<DbAuthUser | null> {
+    const idColumn = provider === "google" ? "googleId" : "facebookId";
+    const user =
+      (await this.em.findOne(User, { [idColumn]: providerId })) ??
+      (await this.em.findOne(User, { email }));
+    if (!user) return null;
+
+    // Update last login
+    await this.em.getConnection().execute(
+      `UPDATE iam.users SET last_login_at = now() WHERE id = ?::uuid`,
+      [user.id],
+    );
+
+    return this.loadUserById(user.id);
   }
 
   private async findOrCreateOAuthUser(params: {
