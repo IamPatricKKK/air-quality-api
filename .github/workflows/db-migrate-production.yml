@@ -13,6 +13,8 @@ env:
 jobs:
   migrate:
     runs-on: ubuntu-latest
+    # Chỉ chủ repo mới được kích hoạt
+    if: github.actor == 'IamPatricKKK'
     environment: production
     concurrency:
       group: db-migrate-production
