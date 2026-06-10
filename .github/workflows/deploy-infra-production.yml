@@ -56,3 +56,8 @@ jobs:
           rm -f infra.env
           ssh ${{ env.SSH_OPTS }} ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
             "cd ${{ env.DEPLOY_PATH }} && docker compose pull && docker compose up -d"
+
+      - name: Reload Caddy (áp Caddyfile mới mà không downtime)
+        run: |
+          ssh ${{ env.SSH_OPTS }} ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+            "cd ${{ env.DEPLOY_PATH }} && docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile 2>/dev/null || docker compose restart caddy"

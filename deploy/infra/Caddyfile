@@ -13,6 +13,11 @@ api.airquality.info.vn {
 	reverse_proxy api:3002
 }
 
+# Môi trường stage cho FE dev chạy local trỏ tới (DB riêng sky_pulse_stage).
+stage.api.airquality.info.vn {
+	reverse_proxy api-stage:3002
+}
+
 admin.airquality.info.vn {
 	reverse_proxy admin:80
 }

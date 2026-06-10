@@ -1,0 +1,23 @@
+# Staging compose — chỉ service API (môi trường stage cho FE dev chạy local).
+# Deploy độc lập qua workflow "Deploy Staging". Dùng chung network + postgres +
+# caddy với production, nhưng DB riêng (sky_pulse_stage) và alias riêng (api-stage).
+
+services:
+  api:
+    image: ${IMAGE}
+    container_name: airquality-api-stage
+    restart: unless-stopped
+    env_file: .env
+    expose:
+      - "3002"
+    networks:
+      airquality_prod:
+        aliases: [api-stage]
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
+networks:
+  airquality_prod:
+    external: true
