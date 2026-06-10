@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-latest
     # Chỉ chủ repo mới được kích hoạt deploy
     if: github.actor == 'IamPatricKKK'
-    environment: production
+    environment: staging
     permissions:
       contents: read
       packages: write

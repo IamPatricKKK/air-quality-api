@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     # Chỉ chủ repo mới được kích hoạt
     if: github.actor == 'IamPatricKKK'
-    environment: production
+    environment: staging
     concurrency:
       group: db-migrate-staging
       cancel-in-progress: false
