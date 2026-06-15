@@ -58,6 +58,19 @@ export class DeliveryDispatcher {
       this.logger.log(`Skipped alert email for admin user ${alert.user_id}`);
     }
 
+    // Respect the user's global notification preferences. A rule may request
+    // email/push, but the user can turn those channels off entirely in
+    // "Cài đặt thông báo". In-app is always delivered (cannot be disabled).
+    const prefs = await this.getNotificationPrefs(alert.user_id);
+    if (channels.includes("email") && !prefs.emailEnabled) {
+      channels = channels.filter((c) => c !== "email");
+      this.logger.log(`Skipped alert email for user ${alert.user_id} (email disabled)`);
+    }
+    if (channels.includes("push") && !prefs.pushEnabled) {
+      channels = channels.filter((c) => c !== "push");
+      this.logger.log(`Skipped alert push for user ${alert.user_id} (push disabled)`);
+    }
+
     for (const channel of channels) {
       const deliveryId = await this.createDelivery(alert.id, channel);
       if (!deliveryId) continue;
@@ -82,6 +95,28 @@ export class DeliveryDispatcher {
         await this.markDelivery(deliveryId, "failed", String(err));
       }
     }
+  }
+
+  /**
+   * Đọc tuỳ chọn nhận thông báo của user. Mặc định bật (true) nếu chưa có bản
+   * ghi preferences — khớp với DEFAULT_PREFERENCES bên users.controller.
+   */
+  private async getNotificationPrefs(
+    userId: string,
+  ): Promise<{ emailEnabled: boolean; pushEnabled: boolean }> {
+    const rows: any = await this.em.getConnection().execute(
+      `SELECT email_enabled, push_enabled
+         FROM app.user_preferences
+        WHERE user_id = ?::uuid
+        LIMIT 1`,
+      [userId],
+    );
+    const list = Array.isArray(rows) ? rows : (rows.rows ?? []);
+    const row = list[0];
+    return {
+      emailEnabled: row ? row.email_enabled !== false : true,
+      pushEnabled: row ? row.push_enabled !== false : true,
+    };
   }
 
   private async isAdminUser(userId: string): Promise<boolean> {

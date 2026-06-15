@@ -39,6 +39,7 @@ export interface AuthUserContext {
   email: string;
   displayName: string;
   roles: string[];
+  authProvider?: string;
 }
 
 export interface AccessTokenClaims {
@@ -50,6 +51,7 @@ export interface AccessTokenClaims {
   displayName: string;
   user_metadata: {
     display_name: string;
+    auth_provider?: string;
   };
   iat: number;
   exp: number;
@@ -161,6 +163,7 @@ export function issueAccessToken(user: AuthUserContext) {
     displayName: user.displayName,
     user_metadata: {
       display_name: user.displayName,
+      auth_provider: user.authProvider ?? "local",
     },
     iat: issuedAt,
     exp: expiresAt,

@@ -18,6 +18,7 @@ interface DbAuthUser {
   email: string;
   displayName: string;
   roles: string[];
+  authProvider?: string;
   emailVerifiedAt?: string | null;
 }
 
@@ -26,6 +27,7 @@ function buildAuthResponse(user: {
   email: string;
   displayName: string;
   roles: string[];
+  authProvider?: string;
 }) {
   const session = issueAccessToken(user);
 
@@ -37,6 +39,7 @@ function buildAuthResponse(user: {
       displayName: user.displayName,
       user_metadata: {
         display_name: user.displayName,
+        auth_provider: user.authProvider ?? "local",
       },
     },
     session: {
@@ -49,12 +52,13 @@ function buildAuthResponse(user: {
 
 async function loadUserByEmail(em: EntityManager, email: string, password: string): Promise<DbAuthUser | null> {
   // Use raw SQL for PostgreSQL crypt() function verification
-  const result = await em.getConnection().execute<{ id: string; email: string; display_name?: string; roles?: string[]; email_verified_at?: string | null }>(
+  const result = await em.getConnection().execute<{ id: string; email: string; display_name?: string; roles?: string[]; auth_provider?: string; email_verified_at?: string | null }>(
     `
       SELECT
         u.id::text,
         u.email,
         u.email_verified_at,
+        u.auth_provider,
         up.display_name,
         ARRAY_REMOVE(ARRAY_AGG(r.code), NULL) AS roles
       FROM iam.users u
@@ -63,7 +67,7 @@ async function loadUserByEmail(em: EntityManager, email: string, password: strin
       LEFT JOIN iam.roles r ON r.id = ur.role_id
       WHERE u.email = ?
         AND u.password_hash = crypt(?, u.password_hash)
-      GROUP BY u.id, up.display_name, u.email_verified_at
+      GROUP BY u.id, up.display_name, u.email_verified_at, u.auth_provider
       LIMIT 1
     `,
     [email, password],
@@ -79,6 +83,7 @@ async function loadUserByEmail(em: EntityManager, email: string, password: strin
     email: row.email,
     displayName: row.display_name ?? email.split("@")[0],
     roles: row.roles ?? ["user"],
+    authProvider: row.auth_provider ?? "local",
     emailVerifiedAt: row.email_verified_at ?? null,
   };
 }
@@ -363,6 +368,7 @@ export class AuthController {
           displayName: row.displayName,
           user_metadata: {
             display_name: row.displayName,
+            auth_provider: row.authProvider ?? "local",
           },
         };
       }
@@ -381,6 +387,7 @@ export class AuthController {
           displayName: row.displayName,
           user_metadata: {
             display_name: row.displayName,
+            auth_provider: row.authProvider ?? "local",
           },
         };
       }
@@ -505,11 +512,12 @@ export class AuthController {
 
   private async loadUserById(userId: string): Promise<DbAuthUser | null> {
     // Use raw SQL for aggregating roles efficiently
-    const result = await this.em.getConnection().execute<{ id: string; email: string; display_name?: string; roles?: string[] }>(
+    const result = await this.em.getConnection().execute<{ id: string; email: string; display_name?: string; roles?: string[]; auth_provider?: string }>(
       `
         SELECT
           u.id::text,
           u.email,
+          u.auth_provider,
           up.display_name,
           ARRAY_REMOVE(ARRAY_AGG(r.code), NULL) AS roles
         FROM iam.users u
@@ -517,7 +525,7 @@ export class AuthController {
         LEFT JOIN iam.user_roles ur ON ur.user_id = u.id
         LEFT JOIN iam.roles r ON r.id = ur.role_id
         WHERE u.id = ?::uuid
-        GROUP BY u.id, up.display_name
+        GROUP BY u.id, up.display_name, u.auth_provider
         LIMIT 1
       `,
       [userId],
@@ -533,6 +541,7 @@ export class AuthController {
       email: row.email,
       displayName: row.display_name ?? row.email.split("@")[0],
       roles: row.roles ?? ["user"],
+      authProvider: row.auth_provider ?? "local",
     };
   }
 }
