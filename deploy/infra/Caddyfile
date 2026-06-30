@@ -25,3 +25,11 @@ admin.airquality.info.vn {
 be.airquality.info.vn {
 	reverse_proxy be:8000
 }
+
+liveroom.deev.io.vn {
+	reverse_proxy liveroom-web:3000
+}
+
+api.liveroom.deev.io.vn {
+	reverse_proxy liveroom-api:4000
+}
