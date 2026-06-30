@@ -30,7 +30,7 @@ services:
 
   caddy:
     image: ghcr.io/iampatrickkk/caddy:2-alpine
-    container_name: airquality-caddy
+    container_name: proxy
     restart: unless-stopped
     ports:
       - "80:80"
