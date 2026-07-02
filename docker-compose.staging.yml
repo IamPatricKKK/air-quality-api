@@ -11,7 +11,7 @@ services:
     expose:
       - "3002"
     networks:
-      airquality_prod:
+      web:
         aliases: [api-stage]
     mem_limit: 512m
     logging:
@@ -19,5 +19,5 @@ services:
       options: { max-size: "10m", max-file: "5" }
 
 networks:
-  airquality_prod:
+  web:
     external: true
